@@ -36,12 +36,47 @@ LLM_MODEL=
 LLM_TEMPERATURE=0.2
 ```
 
+## Checkpointer 模式
+
+默认使用 Memory Checkpointer，适合本地开发和测试，服务重启后状态会丢失：
+
+```dotenv
+CHECKPOINTER_BACKEND=memory
+LANGGRAPH_STRICT_MSGPACK=true
+```
+
+需要持久化工作流时切换到 PostgreSQL：
+
+```dotenv
+CHECKPOINTER_BACKEND=postgres
+DATABASE_URL=postgresql://postgres:password@localhost:5432/ai_content_agent
+LANGGRAPH_STRICT_MSGPACK=true
+```
+
+PostgreSQL 模式会在应用启动时运行 LangGraph Checkpointer 的 `setup()` 和 migrations，并在应用生命周期内复用同一个 saver 和 compiled graph。服务重启后，可使用原 `thread_id` 继续读取和恢复工作流。
+
+LangGraph 自动维护的 checkpoint 表只保存工作流执行状态，不是项目的业务历史表或任务列表。
+
+Windows 下使用 Psycopg async 连接 PostgreSQL 时，显式使用 SelectorEventLoop 启动 Uvicorn：
+
+```powershell
+.venv\Scripts\python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --loop asyncio:SelectorEventLoop
+```
+
 ## 测试
 
 ```powershell
 .venv\Scripts\python -m pytest
 ```
 
+当前 Windows 开发机若在 pytest 创建缓存目录时退出卡顿，可临时禁用 cacheprovider：
+
+```powershell
+.venv\Scripts\python -m pytest -p no:cacheprovider
+```
+
+该参数仅用于绕过本机 pytest 缓存文件系统问题，不是 LangGraph 或 PostgreSQL 的业务要求。
+
 ## 当前限制
 
-图片生成仍为 Mock。Checkpointer 使用 InMemorySaver，仅支持单进程、单 worker，服务重启后 workflow 状态会丢失。
+图片生成仍为 Mock。Memory Checkpointer 仅适用于单进程开发和测试；持久化部署应使用 PostgreSQL 模式。

@@ -1,7 +1,8 @@
 from typing import Literal
 
-from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
 from app.graph.nodes import (
     extract_visuals,
@@ -46,6 +47,8 @@ workflow_builder.add_conditional_edges(
 workflow_builder.add_edge("extract_visuals", "generate_images")
 workflow_builder.add_edge("generate_images", END)
 
-# These process-wide instances must be reused for every request in phase one.
-checkpointer = InMemorySaver()
-content_workflow = workflow_builder.compile(checkpointer=checkpointer)
+
+def compile_content_workflow(
+    checkpointer: BaseCheckpointSaver,
+) -> CompiledStateGraph:
+    return workflow_builder.compile(checkpointer=checkpointer)

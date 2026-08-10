@@ -1,8 +1,20 @@
 import asyncio
 
+import pytest
 from httpx import ASGITransport, AsyncClient, Response
 
 from app.main import app
+
+
+@pytest.fixture(autouse=True)
+def initialized_app_lifespan(memory_workflow_config):
+    lifespan_context = app.router.lifespan_context(app)
+    with asyncio.Runner() as lifespan_runner:
+        lifespan_runner.run(lifespan_context.__aenter__())
+        try:
+            yield
+        finally:
+            lifespan_runner.run(lifespan_context.__aexit__(None, None, None))
 
 
 def request(method: str, path: str, **kwargs) -> Response:
@@ -27,7 +39,10 @@ def start_workflow() -> dict:
     return response.json()
 
 
-def select_topic(thread_id: str, topic_id: str = "topic_1") -> dict:
+def select_topic(
+    thread_id: str,
+    topic_id: str = "topic_1",
+) -> dict:
     response = request(
         "POST",
         f"/api/v1/workflows/{thread_id}/resume",

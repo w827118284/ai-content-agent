@@ -9,6 +9,18 @@ from app.graph.runner import (
     resume_workflow,
     start_workflow,
 )
+from app.main import app
+
+
+@pytest.fixture(autouse=True)
+def initialized_workflow_runtime(memory_workflow_config):
+    lifespan_context = app.router.lifespan_context(app)
+    with asyncio.Runner() as lifespan_runner:
+        lifespan_runner.run(lifespan_context.__aenter__())
+        try:
+            yield
+        finally:
+            lifespan_runner.run(lifespan_context.__aexit__(None, None, None))
 
 
 def run(coroutine):

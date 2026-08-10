@@ -4,8 +4,8 @@ from uuid import uuid4
 from langgraph.types import Command
 
 from app.graph.nodes import WorkflowNodeInputError
+from app.graph.runtime import get_content_workflow
 from app.graph.state import AgentState
-from app.graph.workflow import content_workflow
 
 
 class WorkflowNotFoundError(LookupError):
@@ -92,7 +92,7 @@ def _result_from_snapshot(thread_id: str, snapshot: Any) -> dict[str, Any]:
 
 
 async def _get_snapshot(thread_id: str) -> Any:
-    snapshot = await content_workflow.aget_state(_graph_config(thread_id))
+    snapshot = await get_content_workflow().aget_state(_graph_config(thread_id))
     if not snapshot.values:
         raise WorkflowNotFoundError(f"workflow thread_id 不存在: {thread_id}")
     return snapshot
@@ -101,8 +101,9 @@ async def _get_snapshot(thread_id: str) -> Any:
 async def start_workflow(topic_direction: str) -> dict[str, Any]:
     thread_id = str(uuid4())
     config = _graph_config(thread_id)
-    await content_workflow.ainvoke(_initial_state(topic_direction), config=config)
-    snapshot = await content_workflow.aget_state(config)
+    workflow = get_content_workflow()
+    await workflow.ainvoke(_initial_state(topic_direction), config=config)
+    snapshot = await workflow.aget_state(config)
     return _result_from_snapshot(thread_id, snapshot)
 
 
@@ -124,7 +125,10 @@ async def resume_workflow(
     _validate_resume_payload(snapshot, requested_type, payload)
 
     try:
-        await content_workflow.ainvoke(Command(resume=payload), config=_graph_config(thread_id))
+        await get_content_workflow().ainvoke(
+            Command(resume=payload),
+            config=_graph_config(thread_id),
+        )
     except WorkflowNodeInputError as exc:
         raise WorkflowValidationError(str(exc)) from exc
 
