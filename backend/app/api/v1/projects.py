@@ -1,7 +1,8 @@
 from typing import Annotated
-
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from app.api.deps.auth import get_current_user
+from app.models.user import User
 from app.repositories.content_project_repository import (
     ContentProjectRepository,
     get_content_project_repository,
@@ -14,6 +15,7 @@ router = APIRouter(prefix="/projects", tags=["projects"])
 
 @router.get("", response_model=ProjectListResponse)
 async def list_projects(
+    current_user: Annotated[User, Depends(get_current_user)],
     repository: Annotated[
         ContentProjectRepository | None,
         Depends(get_content_project_repository),
@@ -27,7 +29,11 @@ async def list_projects(
             detail="历史记录数据库未配置",
         )
 
-    projects, total = await repository.list_projects(limit=limit, offset=offset)
+    projects, total = await repository.list_projects(
+        user_id=current_user.id,
+        limit=limit,
+        offset=offset,
+    )
     return ProjectListResponse(
         items=projects,
         total=total,

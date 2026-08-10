@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from pydantic import ValidationError
 
 from app.core.config import Settings
 from app.graph.runtime import (
@@ -29,6 +30,22 @@ def run(coroutine):
 def clear_checkpointer_environment(monkeypatch):
     for name in CHECKPOINTER_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
+
+
+def test_jwt_secret_is_required(monkeypatch):
+    clear_checkpointer_environment(monkeypatch)
+    monkeypatch.delenv("JWT_SECRET_KEY", raising=False)
+
+    with pytest.raises(ValidationError, match="JWT_SECRET_KEY"):
+        Settings(_env_file=None)
+
+
+def test_jwt_secret_must_be_at_least_32_utf8_bytes(monkeypatch):
+    clear_checkpointer_environment(monkeypatch)
+    monkeypatch.setenv("JWT_SECRET_KEY", "too-short")
+
+    with pytest.raises(ValidationError, match="at least 32 bytes"):
+        Settings(_env_file=None)
 
 
 def test_checkpointer_configuration_defaults_to_memory(monkeypatch):

@@ -1,6 +1,15 @@
-import { Bot, LoaderCircle, RefreshCw, X } from "lucide-react";
+import {
+  Bot,
+  LoaderCircle,
+  LogOut,
+  RefreshCw,
+  UserRound,
+  X,
+} from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { getCurrentUser } from "./api/auth";
+import { AUTH_UNAUTHORIZED_EVENT } from "./api/client";
 import {
   getWorkflowState,
   listProjects,
@@ -8,12 +17,19 @@ import {
   startWorkflow,
   WorkflowApiError,
 } from "./api/workflows";
+import {
+  clearAccessToken,
+  getAccessToken,
+  setAccessToken,
+} from "./auth/token";
 import { ArticleReview } from "./components/ArticleReview";
+import { AuthScreen } from "./components/AuthScreen";
 import { HistorySidebar } from "./components/HistorySidebar";
 import { ResultView } from "./components/ResultView";
 import { StartPanel } from "./components/StartPanel";
 import { TopicSelection } from "./components/TopicSelection";
 import { WorkflowProgress } from "./components/WorkflowProgress";
+import type { AuthUser } from "./types/auth";
 import type {
   ContentProjectSummary,
   WorkflowResponse,
@@ -40,7 +56,12 @@ function errorMessage(error: unknown): string {
   return "请求处理失败，请稍后重试。";
 }
 
-export default function App() {
+interface WorkspaceProps {
+  user: AuthUser;
+  onLogout: () => void;
+}
+
+function Workspace({ user, onLogout }: WorkspaceProps) {
   const [workflow, setWorkflow] = useState<WorkflowResponse | null>(null);
   const [projects, setProjects] = useState<ContentProjectSummary[]>([]);
   const [projectTotal, setProjectTotal] = useState(0);
@@ -54,6 +75,13 @@ export default function App() {
   const [historyError, setHistoryError] = useState<string | null>(null);
   const workflowLoadGeneration = useRef(0);
   const historyRefreshGeneration = useRef(0);
+
+  useEffect(() => {
+    return () => {
+      workflowLoadGeneration.current += 1;
+      historyRefreshGeneration.current += 1;
+    };
+  }, []);
 
   const refreshHistory = useCallback(
     async (initialLoad = false): Promise<void> => {
@@ -148,15 +176,25 @@ export default function App() {
     if (busy) {
       return;
     }
+    const requestGeneration = ++workflowLoadGeneration.current;
     setBusy(true);
     setError(null);
     try {
-      applyWorkflow(await request());
+      const response = await request();
+      if (requestGeneration !== workflowLoadGeneration.current) {
+        return;
+      }
+      applyWorkflow(response);
       void refreshHistory();
     } catch (requestError) {
+      if (requestGeneration !== workflowLoadGeneration.current) {
+        return;
+      }
       setError(errorMessage(requestError));
     } finally {
-      setBusy(false);
+      if (requestGeneration === workflowLoadGeneration.current) {
+        setBusy(false);
+      }
     }
   }
 
@@ -226,6 +264,7 @@ export default function App() {
 
   function handleNewTask() {
     workflowLoadGeneration.current += 1;
+    historyRefreshGeneration.current += 1;
     window.localStorage.removeItem(THREAD_STORAGE_KEY);
     setWorkflow(null);
     setError(null);
@@ -307,15 +346,30 @@ export default function App() {
             <h1>AI 内容运营智能体</h1>
           </div>
         </div>
-        {workflow ? (
-          <div className="workflow-identity">
-            <span className="status-dot" aria-hidden="true" />
-            <div>
-              <span>{statusLabels[workflow.status]}</span>
-              <code>{workflow.thread_id.slice(0, 8)}</code>
+        <div className="topbar-actions">
+          {workflow ? (
+            <div className="workflow-identity">
+              <span className="status-dot" aria-hidden="true" />
+              <div>
+                <span>{statusLabels[workflow.status]}</span>
+                <code>{workflow.thread_id.slice(0, 8)}</code>
+              </div>
             </div>
+          ) : null}
+          <div className="account-identity">
+            <UserRound size={17} aria-hidden="true" />
+            <span>{user.username}</span>
+            <button
+              className="icon-button"
+              type="button"
+              onClick={onLogout}
+              aria-label="退出登录"
+              title="退出登录"
+            >
+              <LogOut size={17} />
+            </button>
           </div>
-        ) : null}
+        </div>
       </header>
 
       <main className="main-content">
@@ -366,4 +420,75 @@ export default function App() {
       </main>
     </div>
   );
+}
+
+
+type AuthenticationState = "checking" | "anonymous" | "authenticated";
+
+export default function App() {
+  const [authenticationState, setAuthenticationState] =
+    useState<AuthenticationState>("checking");
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+
+  const logout = useCallback(() => {
+    clearAccessToken();
+    window.localStorage.removeItem(THREAD_STORAGE_KEY);
+    setCurrentUser(null);
+    setAuthenticationState("anonymous");
+  }, []);
+
+  useEffect(() => {
+    window.addEventListener(AUTH_UNAUTHORIZED_EVENT, logout);
+    return () => window.removeEventListener(AUTH_UNAUTHORIZED_EVENT, logout);
+  }, [logout]);
+
+  useEffect(() => {
+    const token = getAccessToken();
+    if (!token) {
+      setAuthenticationState("anonymous");
+      return;
+    }
+
+    let cancelled = false;
+    getCurrentUser(token)
+      .then((user) => {
+        if (!cancelled) {
+          setCurrentUser(user);
+          setAuthenticationState("authenticated");
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          logout();
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [logout]);
+
+  function handleAuthenticated(token: string, user: AuthUser) {
+    window.localStorage.removeItem(THREAD_STORAGE_KEY);
+    setAccessToken(token);
+    setCurrentUser(user);
+    setAuthenticationState("authenticated");
+  }
+
+  if (authenticationState === "checking") {
+    return (
+      <main className="auth-page">
+        <div className="auth-checking" role="status">
+          <LoaderCircle className="spin" size={24} aria-hidden="true" />
+          <span>正在验证登录状态</span>
+        </div>
+      </main>
+    );
+  }
+
+  if (authenticationState === "anonymous" || currentUser === null) {
+    return <AuthScreen onAuthenticated={handleAuthenticated} />;
+  }
+
+  return <Workspace user={currentUser} onLogout={logout} />;
 }

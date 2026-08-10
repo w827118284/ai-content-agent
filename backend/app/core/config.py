@@ -34,6 +34,16 @@ class Settings(BaseSettings):
         default=True,
         validation_alias="LANGGRAPH_STRICT_MSGPACK",
     )
+    jwt_secret_key: SecretStr = Field(validation_alias="JWT_SECRET_KEY")
+    jwt_algorithm: Literal["HS256"] = Field(
+        default="HS256",
+        validation_alias="JWT_ALGORITHM",
+    )
+    jwt_access_token_expire_minutes: int = Field(
+        default=60,
+        ge=1,
+        validation_alias="JWT_ACCESS_TOKEN_EXPIRE_MINUTES",
+    )
     use_mock_llm: bool = Field(default=True, validation_alias="USE_MOCK_LLM")
     llm_api_key: str | None = Field(default=None, validation_alias="LLM_API_KEY")
     llm_base_url: str | None = Field(default=None, validation_alias="LLM_BASE_URL")
@@ -50,6 +60,13 @@ class Settings(BaseSettings):
     def parse_cors_origins(cls, value: object) -> object:
         if isinstance(value, str):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
+        return value
+
+    @field_validator("jwt_secret_key")
+    @classmethod
+    def validate_jwt_secret_key(cls, value: SecretStr) -> SecretStr:
+        if len(value.get_secret_value().encode("utf-8")) < 32:
+            raise ValueError("JWT_SECRET_KEY must be at least 32 bytes when UTF-8 encoded")
         return value
 
 

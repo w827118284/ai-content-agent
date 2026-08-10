@@ -59,7 +59,7 @@ export interface ContentProjectSummary {
   thread_id: string;
   topic_direction: string;
   selected_topic_title: string | null;
-  status: WorkflowStatus;
+  status: WorkflowStatus | "starting";
   revision_count: number;
   created_at: string;
   updated_at: string;

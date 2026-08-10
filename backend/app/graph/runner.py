@@ -98,8 +98,11 @@ async def _get_snapshot(thread_id: str) -> Any:
     return snapshot
 
 
-async def start_workflow(topic_direction: str) -> dict[str, Any]:
-    thread_id = str(uuid4())
+async def start_workflow(
+    topic_direction: str,
+    thread_id: str | None = None,
+) -> dict[str, Any]:
+    thread_id = thread_id or str(uuid4())
     config = _graph_config(thread_id)
     workflow = get_content_workflow()
     await workflow.ainvoke(_initial_state(topic_direction), config=config)

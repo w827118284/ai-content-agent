@@ -71,6 +71,119 @@ a:focus-visible {
   min-height: 100vh;
 }
 
+.auth-page {
+  min-height: 100vh;
+  padding: 32px 18px;
+  display: grid;
+  place-items: center;
+  background: #eef2f0;
+}
+
+.auth-panel {
+  width: min(420px, 100%);
+  padding: 30px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.auth-brand p,
+.auth-brand h1 {
+  margin: 0;
+}
+
+.auth-brand p {
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.auth-brand h1 {
+  margin-top: 2px;
+  font-size: 1.18rem;
+  line-height: 1.25;
+}
+
+.auth-tabs {
+  margin-top: 28px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  padding: 3px;
+  background: #edf1ef;
+  border-radius: 7px;
+}
+
+.auth-tabs button {
+  min-height: 38px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  font-weight: 650;
+}
+
+.auth-tabs button.is-active {
+  color: var(--ink);
+  background: var(--surface);
+  box-shadow: 0 1px 4px rgba(28, 42, 37, 0.12);
+}
+
+.auth-form {
+  margin-top: 24px;
+  display: grid;
+  gap: 10px;
+}
+
+.auth-form label {
+  color: #39443f;
+  font-size: 0.82rem;
+  font-weight: 650;
+}
+
+.auth-form input {
+  width: 100%;
+  min-height: 44px;
+  margin-bottom: 6px;
+  padding: 0 12px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+}
+
+.auth-form input:focus {
+  border-color: var(--primary);
+}
+
+.auth-error {
+  padding: 10px 12px;
+  color: var(--danger);
+  background: var(--danger-soft);
+  border: 1px solid #efc9cd;
+  border-radius: 6px;
+  font-size: 0.84rem;
+}
+
+.auth-submit {
+  width: 100%;
+  margin-top: 8px;
+}
+
+.auth-checking {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--primary);
+  font-weight: 650;
+}
+
 .topbar {
   min-height: 76px;
   padding: 14px max(24px, calc((100vw - 1480px) / 2));
@@ -126,6 +239,32 @@ a:focus-visible {
   align-items: center;
   gap: 9px;
   color: var(--muted);
+}
+
+.topbar-actions,
+.account-identity {
+  display: flex;
+  align-items: center;
+}
+
+.topbar-actions {
+  min-width: 0;
+  gap: 20px;
+}
+
+.account-identity {
+  min-width: 0;
+  gap: 8px;
+  color: #43504b;
+  font-size: 0.84rem;
+  font-weight: 650;
+}
+
+.account-identity > span {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .workflow-identity > div {
@@ -1071,6 +1210,27 @@ textarea::placeholder {
 
   .brand h1 {
     font-size: 1rem;
+  }
+
+  .topbar-actions {
+    gap: 8px;
+  }
+
+  .workflow-identity {
+    display: none;
+  }
+
+  .account-identity > span {
+    max-width: 92px;
+  }
+
+  .auth-page {
+    padding: 12px;
+  }
+
+  .auth-panel {
+    padding: 24px 18px;
+    box-shadow: none;
   }
 
   .main-content {

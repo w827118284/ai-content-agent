@@ -3,6 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import App, { THREAD_STORAGE_KEY } from "./App";
+import { getCurrentUser, loginUser, registerUser } from "./api/auth";
+import { ApiError, AUTH_UNAUTHORIZED_EVENT } from "./api/client";
 import {
   getWorkflowState,
   listProjects,
@@ -10,6 +12,8 @@ import {
   startWorkflow,
   WorkflowApiError,
 } from "./api/workflows";
+import { ACCESS_TOKEN_STORAGE_KEY } from "./auth/token";
+import type { AuthUser } from "./types/auth";
 import type {
   AgentState,
   ContentProjectSummary,
@@ -31,10 +35,25 @@ vi.mock("./api/workflows", async () => {
   };
 });
 
+vi.mock("./api/auth", () => ({
+  getCurrentUser: vi.fn(),
+  loginUser: vi.fn(),
+  registerUser: vi.fn(),
+}));
+
 const mockedStartWorkflow = vi.mocked(startWorkflow);
 const mockedResumeWorkflow = vi.mocked(resumeWorkflow);
 const mockedGetWorkflowState = vi.mocked(getWorkflowState);
 const mockedListProjects = vi.mocked(listProjects);
+const mockedGetCurrentUser = vi.mocked(getCurrentUser);
+const mockedLoginUser = vi.mocked(loginUser);
+const mockedRegisterUser = vi.mocked(registerUser);
+
+const authUser: AuthUser = {
+  id: "018f0000-0000-7000-8000-000000000100",
+  username: "phase6_user_a",
+  created_at: "2026-08-10T05:00:00Z",
+};
 
 const threadId = "thread-12345678";
 const topics: TopicOption[] = Array.from({ length: 5 }, (_, index) => ({
@@ -170,6 +189,8 @@ describe("AI content workflow", () => {
   beforeEach(() => {
     window.localStorage.clear();
     vi.clearAllMocks();
+    window.localStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, "test-access-token");
+    mockedGetCurrentUser.mockResolvedValue(authUser);
     mockedListProjects.mockResolvedValue(projectListResponse([]));
   });
 
@@ -234,6 +255,37 @@ describe("AI content workflow", () => {
       action: "reject",
       data: { feedback: "增加实际代码示例" },
     });
+  });
+
+  it("keeps the new task page when a pending reject resolves later", async () => {
+    const user = userEvent.setup();
+    const pendingReject = deferred<WorkflowResponse>();
+    window.localStorage.setItem(THREAD_STORAGE_KEY, threadId);
+    mockedGetWorkflowState.mockResolvedValue(articleReviewResponse());
+    mockedResumeWorkflow.mockReturnValue(pendingReject.promise);
+
+    render(<App />);
+    await screen.findByText("初稿标题");
+    await user.click(screen.getByRole("button", { name: "要求修改" }));
+    await user.type(
+      screen.getByRole("textbox", { name: "修改意见" }),
+      "增加实际代码示例",
+    );
+    await user.click(screen.getByRole("button", { name: "提交修改意见" }));
+    await user.click(screen.getByRole("button", { name: "新任务" }));
+
+    await act(async () => {
+      pendingReject.resolve(
+        articleReviewResponse(1, "# 不应重新激活的旧工作流"),
+      );
+      await pendingReject.promise;
+    });
+
+    expect(
+      screen.getByRole("heading", { name: "创建今天的内容方向" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("不应重新激活的旧工作流")).not.toBeInTheDocument();
+    expect(window.localStorage.getItem(THREAD_STORAGE_KEY)).toBeNull();
   });
 
   it("supports two consecutive reject cycles", async () => {
@@ -335,7 +387,7 @@ describe("AI content workflow", () => {
     render(<App />);
 
     const history = await screen.findByLabelText("历史任务");
-    expect(within(history).getByText("历史选题任务")).toBeInTheDocument();
+    expect(await within(history).findByText("历史选题任务")).toBeInTheDocument();
     expect(within(history).getByText("已完成的历史任务")).toBeInTheDocument();
     expect(within(history).getByText("LangGraph 状态恢复")).toBeInTheDocument();
     expect(within(history).getByText("2 次修改")).toBeInTheDocument();
@@ -672,5 +724,179 @@ describe("AI content workflow", () => {
         name: `打开历史任务：${staleProject.topic_direction}`,
       }),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("authentication lifecycle", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    vi.clearAllMocks();
+    mockedGetCurrentUser.mockResolvedValue(authUser);
+    mockedListProjects.mockResolvedValue(projectListResponse([]));
+  });
+
+  it("shows login UI when no token exists", async () => {
+    render(<App />);
+
+    expect(
+      await screen.findByRole("tab", { name: "登录" }),
+    ).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("textbox", { name: "用户名" })).toBeInTheDocument();
+    expect(mockedGetCurrentUser).not.toHaveBeenCalled();
+  });
+
+  it("registers, logs in, stores the token, and opens the workspace", async () => {
+    const user = userEvent.setup();
+    const registeredUser = { ...authUser, username: "registered_user" };
+    mockedRegisterUser.mockResolvedValue(registeredUser);
+    mockedLoginUser.mockResolvedValue({
+      access_token: "registered-access-token",
+      token_type: "bearer",
+      expires_in: 3600,
+    });
+
+    render(<App />);
+    await user.click(await screen.findByRole("tab", { name: "注册" }));
+    await user.type(screen.getByRole("textbox", { name: "用户名" }), "registered_user");
+    await user.type(screen.getByLabelText("密码"), "registered-password");
+    await user.click(screen.getByRole("button", { name: "注册并登录" }));
+
+    expect(await screen.findByText("registered_user")).toBeInTheDocument();
+    expect(mockedRegisterUser).toHaveBeenCalledWith({
+      username: "registered_user",
+      password: "registered-password",
+    });
+    expect(mockedLoginUser).toHaveBeenCalledOnce();
+    expect(window.localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY)).toBe(
+      "registered-access-token",
+    );
+  });
+
+  it("logs in, verifies /auth/me, and clears a previous user's thread", async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem(THREAD_STORAGE_KEY, "user-a-thread");
+    const userB = { ...authUser, username: "phase6_user_b" };
+    mockedLoginUser.mockResolvedValue({
+      access_token: "user-b-access-token",
+      token_type: "bearer",
+      expires_in: 3600,
+    });
+    mockedGetCurrentUser.mockResolvedValue(userB);
+
+    render(<App />);
+    await user.type(await screen.findByRole("textbox", { name: "用户名" }), "phase6_user_b");
+    await user.type(screen.getByLabelText("密码"), "user-b-password");
+    await user.click(screen.getByRole("button", { name: "登录" }));
+
+    expect(await screen.findByText("phase6_user_b")).toBeInTheDocument();
+    expect(mockedGetCurrentUser).toHaveBeenCalledWith("user-b-access-token");
+    expect(window.localStorage.getItem(THREAD_STORAGE_KEY)).toBeNull();
+    expect(mockedGetWorkflowState).not.toHaveBeenCalled();
+  });
+
+  it("restores authentication from a stored token through /auth/me", async () => {
+    window.localStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, "stored-access-token");
+
+    render(<App />);
+
+    expect(await screen.findByText(authUser.username)).toBeInTheDocument();
+    expect(mockedGetCurrentUser).toHaveBeenCalledWith("stored-access-token");
+    expect(await screen.findByLabelText("历史任务")).toBeInTheDocument();
+  });
+
+  it("clears invalid startup credentials and returns to login", async () => {
+    window.localStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, "expired-access-token");
+    window.localStorage.setItem(THREAD_STORAGE_KEY, "expired-user-thread");
+    mockedGetCurrentUser.mockRejectedValue(new ApiError(401, "token expired"));
+
+    render(<App />);
+
+    expect(await screen.findByRole("tab", { name: "登录" })).toBeInTheDocument();
+    expect(window.localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY)).toBeNull();
+    expect(window.localStorage.getItem(THREAD_STORAGE_KEY)).toBeNull();
+  });
+
+  it("logs out and clears both token and active thread", async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, "active-access-token");
+    window.localStorage.setItem(THREAD_STORAGE_KEY, threadId);
+    mockedGetWorkflowState.mockResolvedValue(topicSelectionResponse());
+
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "退出登录" }));
+
+    expect(await screen.findByRole("tab", { name: "登录" })).toBeInTheDocument();
+    expect(window.localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY)).toBeNull();
+    expect(window.localStorage.getItem(THREAD_STORAGE_KEY)).toBeNull();
+  });
+
+  it("ignores user A workflow response after logout and user B login", async () => {
+    const user = userEvent.setup();
+    const pendingStart = deferred<WorkflowResponse>();
+    const userB = { ...authUser, username: "phase6_user_b" };
+    window.localStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, "user-a-token");
+    mockedStartWorkflow.mockReturnValue(pendingStart.promise);
+
+    render(<App />);
+    await user.type(
+      await screen.findByRole("textbox", { name: "内容方向" }),
+      "用户 A 的工作流",
+    );
+    await user.click(screen.getByRole("button", { name: "生成选题" }));
+    await user.click(screen.getByRole("button", { name: "退出登录" }));
+
+    mockedLoginUser.mockResolvedValue({
+      access_token: "user-b-token",
+      token_type: "bearer",
+      expires_in: 3600,
+    });
+    mockedGetCurrentUser.mockResolvedValue(userB);
+    await user.type(
+      await screen.findByRole("textbox", { name: "用户名" }),
+      userB.username,
+    );
+    await user.type(screen.getByLabelText("密码"), "user-b-password");
+    await user.click(screen.getByRole("button", { name: "登录" }));
+    expect(await screen.findByText(userB.username)).toBeInTheDocument();
+
+    await act(async () => {
+      pendingStart.resolve(topicSelectionResponse("user-a-thread"));
+      await pendingStart.promise;
+    });
+
+    expect(screen.getByText(userB.username)).toBeInTheDocument();
+    expect(window.localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY)).toBe(
+      "user-b-token",
+    );
+    expect(window.localStorage.getItem(THREAD_STORAGE_KEY)).toBeNull();
+    expect(screen.queryByText(topics[0].title)).not.toBeInTheDocument();
+  });
+
+  it("automatically logs out when an authenticated API emits a 401", async () => {
+    window.localStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, "active-access-token");
+    window.localStorage.setItem(THREAD_STORAGE_KEY, threadId);
+
+    render(<App />);
+    await screen.findByText(authUser.username);
+    act(() => {
+      window.dispatchEvent(new Event(AUTH_UNAUTHORIZED_EVENT));
+    });
+
+    expect(await screen.findByRole("tab", { name: "登录" })).toBeInTheDocument();
+    expect(window.localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY)).toBeNull();
+    expect(window.localStorage.getItem(THREAD_STORAGE_KEY)).toBeNull();
+  });
+
+  it("treats a history 401 as session expiration instead of history failure", async () => {
+    window.localStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, "active-access-token");
+    mockedListProjects.mockImplementation(() => {
+      window.dispatchEvent(new Event(AUTH_UNAUTHORIZED_EVENT));
+      return Promise.reject(new ApiError(401, "expired"));
+    });
+
+    render(<App />);
+
+    expect(await screen.findByRole("tab", { name: "登录" })).toBeInTheDocument();
+    expect(screen.queryByText("历史记录加载失败")).not.toBeInTheDocument();
   });
 });

@@ -1,9 +1,13 @@
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
 from app.graph.state import WorkflowStatus
+
+
+ProjectStatus = WorkflowStatus | Literal["starting"]
 
 
 class ContentProjectSummary(BaseModel):
@@ -13,7 +17,7 @@ class ContentProjectSummary(BaseModel):
     thread_id: str
     topic_direction: str
     selected_topic_title: str | None
-    status: WorkflowStatus
+    status: ProjectStatus
     revision_count: int
     created_at: datetime
     updated_at: datetime

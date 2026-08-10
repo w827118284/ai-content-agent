@@ -24,6 +24,18 @@ python -m venv .venv
 Swagger：http://127.0.0.1:8000/docs  
 健康检查：http://127.0.0.1:8000/health
 
+## 用户认证
+
+Phase 6 使用 `pwdlib[argon2]` 保存密码哈希，并使用 PyJWT 签发 HS256 Bearer Access Token。启动前必须在本地 `.env` 配置至少 32 bytes 的随机 Secret（本地可用 `secrets.token_hex(32)` 生成），源码没有默认 Secret：
+
+```dotenv
+JWT_SECRET_KEY=
+JWT_ALGORITHM=HS256
+JWT_ACCESS_TOKEN_EXPIRE_MINUTES=60
+```
+
+JWT 只包含 `sub`、`iat`、`exp`。`sub` 是用户 UUID；密码、数据库连接与外部 API Key 不进入 token。
+
 ## LLM 模式
 
 默认 `USE_MOCK_LLM=true`，无需 API Key。使用真实文字 LLM 时，在本地 `.env` 中设置：
@@ -64,9 +76,36 @@ PostgreSQL 模式下，应用同时维护两类彼此隔离的数据：
 - LangGraph Checkpointer 管理 `checkpoints`、`checkpoint_blobs`、`checkpoint_writes` 和 `checkpoint_migrations`，它们是工作流状态的唯一真源。
 - SQLAlchemy 管理 `content_projects`，只保存历史列表所需的摘要、状态和 `thread_id`，不复制文章、视觉知识点或图片地址。
 
-`GET /api/v1/projects` 支持 `limit`、`offset`，用于返回按最近业务更新时间排序的轻量历史列表。前端历史侧栏点击任务后，仍通过 `GET /api/v1/workflows/{thread_id}/state` 从 checkpoint 恢复完整状态。
+`GET /api/v1/projects` 支持 `limit`、`offset`，并在 SQL 查询中按当前认证用户过滤。读取或恢复 workflow 时，API 会先校验 `content_projects` ownership，再访问 LangGraph checkpoint；其他用户的 `thread_id` 与不存在的 `thread_id` 均返回 404。
 
-当前 MVP 在应用启动时使用 SQLAlchemy `metadata.create_all()` 初始化 `content_projects`。正式生产环境应改用 Alembic 管理 schema migrations。
+Phase 5 遗留的 `user_id IS NULL` 项目保持 unowned，不会显示给普通用户，也不会自动分配给首个注册用户。生产数据如需归属迁移，应另行执行显式、可审计的数据迁移。
+
+## Business Schema Migration
+
+Alembic 只管理 `users`、`content_projects` 与 `alembic_version`。LangGraph 的 `checkpoints`、`checkpoint_blobs`、`checkpoint_writes`、`checkpoint_migrations` 仍完全由 `AsyncPostgresSaver.setup()` 管理，并在 Alembic autogenerate 中被排除。
+
+全新空数据库直接执行：
+
+```powershell
+.venv\Scripts\python -m alembic upgrade head
+```
+
+从已经存在 `content_projects`、但没有 `alembic_version` 的 Phase 5 数据库首次升级时，先核对表字段、约束与索引确实匹配 `0001_phase5_baseline`，再执行：
+
+```powershell
+.venv\Scripts\python -m alembic stamp 0001_phase5_baseline
+.venv\Scripts\python -m alembic upgrade head
+```
+
+后续部署只需执行 `alembic upgrade head`。可用以下命令检查版本与模型差异：
+
+```powershell
+.venv\Scripts\python -m alembic current
+.venv\Scripts\python -m alembic history
+.venv\Scripts\python -m alembic check
+```
+
+FastAPI startup 不执行 `metadata.create_all()`，只创建 AsyncEngine/sessionmaker 并通过 `SELECT 1` 检查业务数据库可用性。隔离测试数据库仍可使用 `initialize_business_database()` 快速建表。
 
 Windows 下使用 Psycopg async 连接 PostgreSQL 时，显式使用 SelectorEventLoop 启动 Uvicorn：
 
@@ -90,4 +129,4 @@ Windows 下使用 Psycopg async 连接 PostgreSQL 时，显式使用 SelectorEve
 
 ## 当前限制
 
-图片生成仍为 Mock。Memory Checkpointer 仅适用于单进程开发和测试；持久化工作流与历史列表需要 PostgreSQL 模式。
+图片生成仍为 Mock。Memory Checkpointer 仅适用于单进程开发和测试；用户、ownership、持久化工作流与历史列表需要 PostgreSQL 模式。本阶段只提供短期 Access Token，不包含 Refresh Token、RBAC 或 OAuth。

@@ -1,6 +1,7 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -9,7 +10,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.core.config import Settings
-from app.models.content_project import Base
+from app.models import Base
 
 
 _session_factory: async_sessionmaker[AsyncSession] | None = None
@@ -31,6 +32,7 @@ def create_business_engine(database_url: str) -> AsyncEngine:
 
 
 async def initialize_business_database(engine: AsyncEngine) -> None:
+    """Create tables only for isolated test databases."""
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
 
@@ -62,7 +64,8 @@ async def business_database_runtime(config: Settings) -> AsyncIterator[None]:
 
     engine = create_business_engine(config.database_url.get_secret_value())
     try:
-        await initialize_business_database(engine)
+        async with engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
         _session_factory = async_sessionmaker(engine, expire_on_commit=False)
         yield
     finally:

@@ -1,8 +1,10 @@
 import logging
 from typing import Annotated, Any
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from app.api.deps.auth import get_current_user
 from app.graph.runner import (
     WorkflowConflictError,
     WorkflowNotFoundError,
@@ -12,6 +14,7 @@ from app.graph.runner import (
     start_workflow,
 )
 from app.graph.state import AgentState
+from app.models.user import User
 from app.repositories.content_project_repository import (
     ContentProjectRepository,
     get_content_project_repository,
@@ -32,45 +35,25 @@ ProjectRepository = Annotated[
 ]
 
 
-async def _create_history_row(
+def _require_repository(
     repository: ContentProjectRepository | None,
-    result: dict[str, Any],
-) -> None:
+) -> ContentProjectRepository:
     if repository is None:
-        return
-    state: AgentState = result["state"]
-    try:
-        await repository.create_project(
-            thread_id=result["thread_id"],
-            topic_direction=state["topic_direction"],
-            selected_topic_title=state["selected_topic"],
-            status=state["status"],
-            revision_count=state["revision_count"],
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="历史记录数据库未配置",
         )
-    except Exception:
-        logger.exception(
-            "Failed to create content project history for thread_id=%s",
-            result["thread_id"],
-        )
+    return repository
 
 
 async def _sync_history_row(
-    repository: ContentProjectRepository | None,
+    repository: ContentProjectRepository,
+    user_id: UUID,
     result: dict[str, Any],
 ) -> None:
-    if repository is None:
-        return
     state: AgentState = result["state"]
     try:
-        project = await repository.update_from_state(result["thread_id"], state)
-        if project is None:
-            await repository.create_project(
-                thread_id=result["thread_id"],
-                topic_direction=state["topic_direction"],
-                selected_topic_title=state["selected_topic"],
-                status=state["status"],
-                revision_count=state["revision_count"],
-            )
+        await repository.update_from_state(result["thread_id"], user_id, state)
     except Exception:
         logger.exception(
             "Failed to sync content project history for thread_id=%s",
@@ -78,20 +61,16 @@ async def _sync_history_row(
         )
 
 
-async def _backfill_missing_history_row(
-    repository: ContentProjectRepository | None,
-    result: dict[str, Any],
+async def _require_owned_project(
+    repository: ContentProjectRepository,
+    thread_id: str,
+    current_user: User,
 ) -> None:
-    if repository is None:
-        return
-    try:
-        project = await repository.get_by_thread_id(result["thread_id"])
-        if project is None:
-            await _create_history_row(repository, result)
-    except Exception:
-        logger.exception(
-            "Failed to backfill content project history for thread_id=%s",
-            result["thread_id"],
+    project = await repository.get_by_thread_id_for_user(thread_id, current_user.id)
+    if project is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"workflow thread_id 不存在: {thread_id}",
         )
 
 
@@ -99,9 +78,29 @@ async def _backfill_missing_history_row(
 async def start(
     request: WorkflowStartRequest,
     repository: ProjectRepository,
+    current_user: Annotated[User, Depends(get_current_user)],
 ) -> WorkflowResponse:
-    result = await start_workflow(request.topic_direction)
-    await _create_history_row(repository, result)
+    owned_projects = _require_repository(repository)
+    thread_id = str(uuid4())
+    await owned_projects.create_project(
+        user_id=current_user.id,
+        thread_id=thread_id,
+        topic_direction=request.topic_direction,
+        status="starting",
+        revision_count=0,
+    )
+    try:
+        result = await start_workflow(request.topic_direction, thread_id=thread_id)
+    except Exception:
+        try:
+            await owned_projects.delete_by_thread_id_for_user(thread_id, current_user.id)
+        except Exception:
+            logger.exception(
+                "Failed to compensate starting project for thread_id=%s",
+                thread_id,
+            )
+        raise
+    await _sync_history_row(owned_projects, current_user.id, result)
     return WorkflowResponse.model_validate(result)
 
 
@@ -110,7 +109,10 @@ async def resume(
     thread_id: str,
     request: WorkflowResumeRequest,
     repository: ProjectRepository,
+    current_user: Annotated[User, Depends(get_current_user)],
 ) -> WorkflowResponse:
+    owned_projects = _require_repository(repository)
+    await _require_owned_project(owned_projects, thread_id, current_user)
     try:
         result = await resume_workflow(thread_id, request.to_resume_payload())
     except WorkflowNotFoundError as exc:
@@ -122,7 +124,7 @@ async def resume(
             status_code=422,
             detail=str(exc),
         ) from exc
-    await _sync_history_row(repository, result)
+    await _sync_history_row(owned_projects, current_user.id, result)
     return WorkflowResponse.model_validate(result)
 
 
@@ -130,10 +132,12 @@ async def resume(
 async def get_state(
     thread_id: str,
     repository: ProjectRepository,
+    current_user: Annotated[User, Depends(get_current_user)],
 ) -> WorkflowResponse:
+    owned_projects = _require_repository(repository)
+    await _require_owned_project(owned_projects, thread_id, current_user)
     try:
         result = await get_workflow_state(thread_id)
     except WorkflowNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    await _backfill_missing_history_row(repository, result)
     return WorkflowResponse.model_validate(result)

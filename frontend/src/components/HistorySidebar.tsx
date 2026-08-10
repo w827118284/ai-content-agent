@@ -7,12 +7,10 @@ import {
   RefreshCw,
 } from "lucide-react";
 
-import type {
-  ContentProjectSummary,
-  WorkflowStatus,
-} from "../types/workflow";
+import type { ContentProjectSummary } from "../types/workflow";
 
-const statusLabels: Record<WorkflowStatus, string> = {
+const statusLabels: Record<ContentProjectSummary["status"], string> = {
+  starting: "正在启动",
   planning_topics: "正在生成选题",
   waiting_topic_selection: "等待选题",
   drafting: "正在生成文章",

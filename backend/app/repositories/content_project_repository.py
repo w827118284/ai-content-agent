@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import Depends
 from sqlalchemy import func, select
@@ -17,6 +18,7 @@ class ContentProjectRepository:
     async def create_project(
         self,
         *,
+        user_id: UUID,
         thread_id: str,
         topic_direction: str,
         status: str,
@@ -24,6 +26,7 @@ class ContentProjectRepository:
         selected_topic_title: str | None = None,
     ) -> ContentProject:
         project = ContentProject(
+            user_id=user_id,
             thread_id=thread_id,
             topic_direction=topic_direction,
             selected_topic_title=selected_topic_title,
@@ -45,18 +48,35 @@ class ContentProjectRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_by_thread_id_for_user(
+        self,
+        thread_id: str,
+        user_id: UUID,
+    ) -> ContentProject | None:
+        result = await self._session.execute(
+            select(ContentProject).where(
+                ContentProject.thread_id == thread_id,
+                ContentProject.user_id == user_id,
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def list_projects(
         self,
         *,
+        user_id: UUID,
         limit: int,
         offset: int,
     ) -> tuple[list[ContentProject], int]:
         total_result = await self._session.execute(
-            select(func.count()).select_from(ContentProject)
+            select(func.count())
+            .select_from(ContentProject)
+            .where(ContentProject.user_id == user_id)
         )
         total = int(total_result.scalar_one())
         result = await self._session.execute(
             select(ContentProject)
+            .where(ContentProject.user_id == user_id)
             .order_by(
                 ContentProject.updated_at.desc(),
                 ContentProject.created_at.desc(),
@@ -69,9 +89,10 @@ class ContentProjectRepository:
     async def update_from_state(
         self,
         thread_id: str,
+        user_id: UUID,
         state: AgentState,
     ) -> ContentProject | None:
-        project = await self.get_by_thread_id(thread_id)
+        project = await self.get_by_thread_id_for_user(thread_id, user_id)
         if project is None:
             return None
 
@@ -86,6 +107,22 @@ class ContentProjectRepository:
             await self._session.rollback()
             raise
         return project
+
+    async def delete_by_thread_id_for_user(
+        self,
+        thread_id: str,
+        user_id: UUID,
+    ) -> bool:
+        project = await self.get_by_thread_id_for_user(thread_id, user_id)
+        if project is None:
+            return False
+        await self._session.delete(project)
+        try:
+            await self._session.commit()
+        except Exception:
+            await self._session.rollback()
+            raise
+        return True
 
 
 async def get_content_project_repository(

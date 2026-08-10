@@ -1,12 +1,10 @@
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, Index, Integer, String, Text, Uuid, func
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, Uuid, func
+from sqlalchemy.orm import Mapped, mapped_column
 
-
-class Base(DeclarativeBase):
-    pass
+from app.models.base import Base
 
 
 def utc_now() -> datetime:
@@ -23,6 +21,12 @@ class ContentProject(Base):
         Uuid(as_uuid=True),
         primary_key=True,
         default=uuid4,
+    )
+    user_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id"),
+        nullable=True,
+        index=True,
     )
     thread_id: Mapped[str] = mapped_column(
         String(255),
