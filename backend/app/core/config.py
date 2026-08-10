@@ -1,7 +1,7 @@
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import Field, SecretStr
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, SecretStr, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -15,6 +15,13 @@ class Settings(BaseSettings):
     app_name: str = "AI Content Operations Agent"
     app_version: str = "0.1.0"
     api_v1_prefix: str = "/api/v1"
+    cors_origins: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: [
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+        ],
+        validation_alias="CORS_ORIGINS",
+    )
     checkpointer_backend: Literal["memory", "postgres"] = Field(
         default="memory",
         validation_alias="CHECKPOINTER_BACKEND",
@@ -37,6 +44,13 @@ class Settings(BaseSettings):
         le=2,
         validation_alias="LLM_TEMPERATURE",
     )
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [origin.strip() for origin in value.split(",") if origin.strip()]
+        return value
 
 
 settings = Settings()

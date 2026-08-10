@@ -1,0 +1,269 @@
+import {
+  Bot,
+  LoaderCircle,
+  RefreshCw,
+  X,
+} from "lucide-react";
+import { useEffect, useState } from "react";
+
+import {
+  getWorkflowState,
+  resumeWorkflow,
+  startWorkflow,
+  WorkflowApiError,
+} from "./api/workflows";
+import { ArticleReview } from "./components/ArticleReview";
+import { ResultView } from "./components/ResultView";
+import { StartPanel } from "./components/StartPanel";
+import { TopicSelection } from "./components/TopicSelection";
+import { WorkflowProgress } from "./components/WorkflowProgress";
+import type { WorkflowResponse, WorkflowStatus } from "./types/workflow";
+
+export const THREAD_STORAGE_KEY = "content_agent_thread_id";
+
+const statusLabels: Record<WorkflowStatus, string> = {
+  planning_topics: "正在生成选题",
+  waiting_topic_selection: "等待选择选题",
+  drafting: "正在生成文章",
+  waiting_article_review: "等待文章审核",
+  rewriting: "正在重写文章",
+  extracting_visuals: "正在提炼视觉点",
+  generating_images: "正在生成图片",
+  completed: "已完成",
+};
+
+function errorMessage(error: unknown): string {
+  if (error instanceof WorkflowApiError) {
+    return error.message;
+  }
+  return "请求处理失败，请稍后重试。";
+}
+
+export default function App() {
+  const [workflow, setWorkflow] = useState<WorkflowResponse | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [restoring, setRestoring] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const storedThreadId = window.localStorage.getItem(THREAD_STORAGE_KEY);
+    if (!storedThreadId) {
+      setRestoring(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    getWorkflowState(storedThreadId)
+      .then((response) => {
+        if (!cancelled) {
+          setWorkflow(response);
+        }
+      })
+      .catch((requestError: unknown) => {
+        if (cancelled) {
+          return;
+        }
+        if (
+          requestError instanceof WorkflowApiError &&
+          requestError.status === 404
+        ) {
+          window.localStorage.removeItem(THREAD_STORAGE_KEY);
+          return;
+        }
+        setError(errorMessage(requestError));
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setRestoring(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  function applyWorkflow(response: WorkflowResponse) {
+    setWorkflow(response);
+    window.localStorage.setItem(THREAD_STORAGE_KEY, response.thread_id);
+  }
+
+  async function runRequest(
+    request: () => Promise<WorkflowResponse>,
+  ): Promise<void> {
+    if (busy) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      applyWorkflow(await request());
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleStart(topicDirection: string) {
+    await runRequest(() => startWorkflow(topicDirection));
+  }
+
+  async function handleSelect(topicId: string) {
+    if (!workflow) {
+      return;
+    }
+    await runRequest(() =>
+      resumeWorkflow(workflow.thread_id, {
+        action: "select_topic",
+        data: { topic_id: topicId },
+      }),
+    );
+  }
+
+  async function handleReject(feedback: string) {
+    if (!workflow) {
+      return;
+    }
+    await runRequest(() =>
+      resumeWorkflow(workflow.thread_id, {
+        action: "reject",
+        data: { feedback },
+      }),
+    );
+  }
+
+  async function handleApprove() {
+    if (!workflow) {
+      return;
+    }
+    await runRequest(() =>
+      resumeWorkflow(workflow.thread_id, { action: "approve" }),
+    );
+  }
+
+  function handleNewTask() {
+    window.localStorage.removeItem(THREAD_STORAGE_KEY);
+    setWorkflow(null);
+    setError(null);
+    setBusy(false);
+  }
+
+  function renderWorkflow() {
+    if (!workflow) {
+      return <StartPanel busy={busy} onStart={handleStart} />;
+    }
+
+    if (
+      workflow.status === "waiting_topic_selection" &&
+      workflow.interrupt?.type === "topic_selection"
+    ) {
+      return (
+        <TopicSelection
+          topics={workflow.state.generated_topics}
+          busy={busy}
+          onSelect={handleSelect}
+        />
+      );
+    }
+
+    if (
+      workflow.status === "waiting_article_review" &&
+      workflow.interrupt?.type === "article_review" &&
+      workflow.state.selected_topic &&
+      workflow.state.article_content
+    ) {
+      return (
+        <ArticleReview
+          selectedTopic={workflow.state.selected_topic}
+          articleContent={workflow.state.article_content}
+          revisionCount={workflow.state.revision_count}
+          busy={busy}
+          onApprove={handleApprove}
+          onReject={handleReject}
+        />
+      );
+    }
+
+    if (
+      workflow.status === "completed" &&
+      workflow.state.selected_topic &&
+      workflow.state.article_content
+    ) {
+      return (
+        <ResultView
+          selectedTopic={workflow.state.selected_topic}
+          articleContent={workflow.state.article_content}
+          revisionCount={workflow.state.revision_count}
+          visualPoints={workflow.state.visual_points}
+          imageUrls={workflow.state.image_urls}
+          onNewTask={handleNewTask}
+        />
+      );
+    }
+
+    return (
+      <div className="processing-state" role="status">
+        <LoaderCircle className="spin" size={26} aria-hidden="true" />
+        <h2>{statusLabels[workflow.status]}</h2>
+      </div>
+    );
+  }
+
+  return (
+    <div className="app-shell">
+      <header className="topbar">
+        <div className="brand">
+          <span className="brand-mark" aria-hidden="true">
+            <Bot size={22} />
+          </span>
+          <div>
+            <p>AI CONTENT DESK</p>
+            <h1>AI 内容运营智能体</h1>
+          </div>
+        </div>
+        {workflow ? (
+          <div className="workflow-identity">
+            <span className="status-dot" aria-hidden="true" />
+            <div>
+              <span>{statusLabels[workflow.status]}</span>
+              <code>{workflow.thread_id.slice(0, 8)}</code>
+            </div>
+          </div>
+        ) : null}
+      </header>
+
+      <main className="main-content">
+        {error ? (
+          <div className="error-banner" role="alert">
+            <span>{error}</span>
+            <button
+              className="icon-button"
+              type="button"
+              onClick={() => setError(null)}
+              aria-label="关闭错误提示"
+              title="关闭"
+            >
+              <X size={17} />
+            </button>
+          </div>
+        ) : null}
+
+        {restoring ? (
+          <div className="restore-state" role="status">
+            <RefreshCw className="spin" size={24} aria-hidden="true" />
+            <span>正在恢复最近任务</span>
+          </div>
+        ) : workflow ? (
+          <div className="workbench">
+            <WorkflowProgress status={workflow.status} />
+            <div className="workflow-surface">{renderWorkflow()}</div>
+          </div>
+        ) : (
+          <div className="start-layout">{renderWorkflow()}</div>
+        )}
+      </main>
+    </div>
+  );
+}

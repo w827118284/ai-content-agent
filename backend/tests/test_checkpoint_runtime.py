@@ -18,6 +18,7 @@ CHECKPOINTER_ENV_VARS = (
     "CHECKPOINTER_BACKEND",
     "DATABASE_URL",
     "LANGGRAPH_STRICT_MSGPACK",
+    "CORS_ORIGINS",
 )
 
 
@@ -38,6 +39,21 @@ def test_checkpointer_configuration_defaults_to_memory(monkeypatch):
     assert configured.checkpointer_backend == "memory"
     assert configured.database_url is None
     assert configured.langgraph_strict_msgpack is True
+
+
+def test_cors_origins_parse_from_comma_separated_environment(monkeypatch):
+    clear_checkpointer_environment(monkeypatch)
+    monkeypatch.setenv(
+        "CORS_ORIGINS",
+        "http://localhost:5173, http://127.0.0.1:5173",
+    )
+
+    configured = Settings(_env_file=None)
+
+    assert configured.cors_origins == [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
 
 
 def test_checkpointer_configuration_parses_postgres_environment(monkeypatch):

@@ -57,6 +57,24 @@ def test_health_and_swagger_are_available():
     assert request("GET", "/docs").status_code == 200
 
 
+def test_cors_allows_configured_frontend_origin():
+    response = request(
+        "OPTIONS",
+        "/api/v1/workflows/start",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == (
+        "http://localhost:5173"
+    )
+    assert "POST" in response.headers["access-control-allow-methods"]
+
+
 def test_api_runs_complete_human_in_the_loop_flow():
     started = start_workflow()
     assert started["interrupt"]["type"] == "topic_selection"
