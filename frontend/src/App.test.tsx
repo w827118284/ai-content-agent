@@ -1,16 +1,19 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import App, { THREAD_STORAGE_KEY } from "./App";
 import {
   getWorkflowState,
+  listProjects,
   resumeWorkflow,
   startWorkflow,
   WorkflowApiError,
 } from "./api/workflows";
 import type {
   AgentState,
+  ContentProjectSummary,
+  ProjectListResponse,
   TopicOption,
   WorkflowResponse,
 } from "./types/workflow";
@@ -24,12 +27,14 @@ vi.mock("./api/workflows", async () => {
     startWorkflow: vi.fn(),
     resumeWorkflow: vi.fn(),
     getWorkflowState: vi.fn(),
+    listProjects: vi.fn(),
   };
 });
 
 const mockedStartWorkflow = vi.mocked(startWorkflow);
 const mockedResumeWorkflow = vi.mocked(resumeWorkflow);
 const mockedGetWorkflowState = vi.mocked(getWorkflowState);
+const mockedListProjects = vi.mocked(listProjects);
 
 const threadId = "thread-12345678";
 const topics: TopicOption[] = Array.from({ length: 5 }, (_, index) => ({
@@ -53,9 +58,9 @@ function state(overrides: Partial<AgentState>): AgentState {
   };
 }
 
-function topicSelectionResponse(): WorkflowResponse {
+function topicSelectionResponse(responseThreadId = threadId): WorkflowResponse {
   return {
-    thread_id: threadId,
+    thread_id: responseThreadId,
     status: "waiting_topic_selection",
     is_completed: false,
     interrupt: {
@@ -70,9 +75,10 @@ function topicSelectionResponse(): WorkflowResponse {
 function articleReviewResponse(
   revisionCount = 0,
   articleContent = "# 初稿标题\n\n这是第一版文章。",
+  responseThreadId = threadId,
 ): WorkflowResponse {
   return {
-    thread_id: threadId,
+    thread_id: responseThreadId,
     status: "waiting_article_review",
     is_completed: false,
     interrupt: {
@@ -92,10 +98,10 @@ function articleReviewResponse(
   };
 }
 
-function completedResponse(): WorkflowResponse {
+function completedResponse(responseThreadId = threadId): WorkflowResponse {
   const visualPoints = ["状态持久化", "Interrupt 恢复", "人工审核闭环"];
   return {
-    thread_id: threadId,
+    thread_id: responseThreadId,
     status: "completed",
     is_completed: true,
     interrupt: null,
@@ -113,6 +119,43 @@ function completedResponse(): WorkflowResponse {
   };
 }
 
+function projectSummary(
+  overrides: Partial<ContentProjectSummary> = {},
+): ContentProjectSummary {
+  return {
+    id: "018f0000-0000-7000-8000-000000000001",
+    thread_id: "history-thread-1",
+    topic_direction: "历史选题任务",
+    selected_topic_title: null,
+    status: "waiting_topic_selection",
+    revision_count: 0,
+    created_at: "2026-08-10T05:00:00Z",
+    updated_at: "2026-08-10T06:00:00Z",
+    ...overrides,
+  };
+}
+
+function projectListResponse(
+  items: ContentProjectSummary[],
+): ProjectListResponse {
+  return {
+    items,
+    total: items.length,
+    limit: 20,
+    offset: 0,
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
+
 async function startFromInitialPage(user: ReturnType<typeof userEvent.setup>) {
   render(<App />);
   const directionInput = await screen.findByRole("textbox", {
@@ -127,6 +170,7 @@ describe("AI content workflow", () => {
   beforeEach(() => {
     window.localStorage.clear();
     vi.clearAllMocks();
+    mockedListProjects.mockResolvedValue(projectListResponse([]));
   });
 
   it("starts a workflow and shows five topics", async () => {
@@ -271,5 +315,362 @@ describe("AI content workflow", () => {
     await waitFor(() => {
       expect(window.localStorage.getItem(THREAD_STORAGE_KEY)).toBeNull();
     });
+  });
+
+  it("loads and displays the history list", async () => {
+    mockedListProjects.mockResolvedValue(
+      projectListResponse([
+        projectSummary(),
+        projectSummary({
+          id: "018f0000-0000-7000-8000-000000000002",
+          thread_id: "history-thread-2",
+          topic_direction: "已完成的历史任务",
+          selected_topic_title: "LangGraph 状态恢复",
+          status: "completed",
+          revision_count: 2,
+        }),
+      ]),
+    );
+
+    render(<App />);
+
+    const history = await screen.findByLabelText("历史任务");
+    expect(within(history).getByText("历史选题任务")).toBeInTheDocument();
+    expect(within(history).getByText("已完成的历史任务")).toBeInTheDocument();
+    expect(within(history).getByText("LangGraph 状态恢复")).toBeInTheDocument();
+    expect(within(history).getByText("2 次修改")).toBeInTheDocument();
+  });
+
+  it("opens a waiting topic selection history item", async () => {
+    const user = userEvent.setup();
+    const project = projectSummary();
+    mockedListProjects.mockResolvedValue(projectListResponse([project]));
+    mockedGetWorkflowState.mockResolvedValue(
+      topicSelectionResponse(project.thread_id),
+    );
+
+    render(<App />);
+    await user.click(
+      await screen.findByRole("button", {
+        name: `打开历史任务：${project.topic_direction}`,
+      }),
+    );
+
+    expect(await screen.findByText(topics[0].title)).toBeInTheDocument();
+    expect(mockedGetWorkflowState).toHaveBeenCalledWith(project.thread_id);
+  });
+
+  it("opens a waiting review history item and can reject it", async () => {
+    const user = userEvent.setup();
+    const project = projectSummary({
+      thread_id: "history-review-thread",
+      topic_direction: "历史审核任务",
+      selected_topic_title: topics[0].title,
+      status: "waiting_article_review",
+    });
+    mockedListProjects.mockResolvedValue(projectListResponse([project]));
+    mockedGetWorkflowState.mockResolvedValue(
+      articleReviewResponse(0, "# 历史初稿", project.thread_id),
+    );
+    mockedResumeWorkflow.mockResolvedValue(
+      articleReviewResponse(1, "# 历史重写稿", project.thread_id),
+    );
+
+    render(<App />);
+    await user.click(
+      await screen.findByRole("button", {
+        name: `打开历史任务：${project.topic_direction}`,
+      }),
+    );
+    await screen.findByText("历史初稿");
+    await user.click(screen.getByRole("button", { name: "要求修改" }));
+    await user.type(
+      screen.getByRole("textbox", { name: "修改意见" }),
+      "增加恢复示例",
+    );
+    await user.click(screen.getByRole("button", { name: "提交修改意见" }));
+
+    expect(await screen.findByText("历史重写稿")).toBeInTheDocument();
+    expect(mockedResumeWorkflow).toHaveBeenCalledWith(project.thread_id, {
+      action: "reject",
+      data: { feedback: "增加恢复示例" },
+    });
+  });
+
+  it("opens a completed history item in the result view", async () => {
+    const user = userEvent.setup();
+    const project = projectSummary({
+      thread_id: "history-completed-thread",
+      topic_direction: "历史完成任务",
+      selected_topic_title: topics[0].title,
+      status: "completed",
+      revision_count: 1,
+    });
+    mockedListProjects.mockResolvedValue(projectListResponse([project]));
+    mockedGetWorkflowState.mockResolvedValue(
+      completedResponse(project.thread_id),
+    );
+
+    render(<App />);
+    await user.click(
+      await screen.findByRole("button", {
+        name: `打开历史任务：${project.topic_direction}`,
+      }),
+    );
+
+    expect(await screen.findByText("任务完成")).toBeInTheDocument();
+    expect(screen.getByText("最终文章")).toBeInTheDocument();
+  });
+
+  it("refreshes history after starting a new workflow", async () => {
+    const user = userEvent.setup();
+    mockedListProjects
+      .mockResolvedValueOnce(projectListResponse([]))
+      .mockResolvedValueOnce(
+        projectListResponse([
+          projectSummary({
+            thread_id: threadId,
+            topic_direction: "LangGraph Human-in-the-loop 实战",
+          }),
+        ]),
+      );
+    mockedStartWorkflow.mockResolvedValue(topicSelectionResponse());
+
+    await startFromInitialPage(user);
+
+    await waitFor(() => expect(mockedListProjects).toHaveBeenCalledTimes(2));
+    expect(
+      await screen.findByRole("button", {
+        name: "打开历史任务：LangGraph Human-in-the-loop 实战",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("refreshes history after a resume changes workflow status", async () => {
+    const user = userEvent.setup();
+    const waitingProject = projectSummary({ thread_id: threadId });
+    const reviewProject = projectSummary({
+      thread_id: threadId,
+      selected_topic_title: topics[0].title,
+      status: "waiting_article_review",
+    });
+    mockedListProjects
+      .mockResolvedValueOnce(projectListResponse([waitingProject]))
+      .mockResolvedValueOnce(projectListResponse([reviewProject]));
+    window.localStorage.setItem(THREAD_STORAGE_KEY, threadId);
+    mockedGetWorkflowState.mockResolvedValue(topicSelectionResponse());
+    mockedResumeWorkflow.mockResolvedValue(articleReviewResponse());
+
+    render(<App />);
+    await screen.findByRole("button", {
+      name: `选择选题：${topics[0].title}`,
+    });
+    await user.click(
+      screen.getByRole("button", { name: `选择选题：${topics[0].title}` }),
+    );
+
+    expect(await screen.findByText("初稿标题")).toBeInTheDocument();
+    await waitFor(() => expect(mockedListProjects).toHaveBeenCalledTimes(2));
+    const history = screen.getByLabelText("历史任务");
+    expect(within(history).getByText("等待审核")).toBeInTheDocument();
+  });
+
+  it("keeps the active workflow usable when history loading fails", async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem(THREAD_STORAGE_KEY, threadId);
+    mockedListProjects.mockRejectedValue(new Error("history unavailable"));
+    mockedGetWorkflowState.mockResolvedValue(articleReviewResponse());
+    mockedResumeWorkflow.mockResolvedValue(
+      articleReviewResponse(1, "# 历史服务失败后的重写稿"),
+    );
+
+    render(<App />);
+
+    expect(await screen.findByText("初稿标题")).toBeInTheDocument();
+    expect(screen.getByText("历史记录加载失败")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "要求修改" }));
+    await user.type(
+      screen.getByRole("textbox", { name: "修改意见" }),
+      "继续重写",
+    );
+    await user.click(screen.getByRole("button", { name: "提交修改意见" }));
+
+    expect(
+      await screen.findByText("历史服务失败后的重写稿"),
+    ).toBeInTheDocument();
+  });
+
+  it("updates localStorage when switching to another history thread", async () => {
+    const user = userEvent.setup();
+    const newProject = projectSummary({
+      thread_id: "new-active-history-thread",
+      topic_direction: "切换后的历史任务",
+    });
+    window.localStorage.setItem(THREAD_STORAGE_KEY, threadId);
+    mockedListProjects.mockResolvedValue(projectListResponse([newProject]));
+    mockedGetWorkflowState
+      .mockResolvedValueOnce(articleReviewResponse())
+      .mockResolvedValueOnce(topicSelectionResponse(newProject.thread_id));
+
+    render(<App />);
+    await screen.findByText("初稿标题");
+    await user.click(
+      await screen.findByRole("button", {
+        name: `打开历史任务：${newProject.topic_direction}`,
+      }),
+    );
+
+    await screen.findByText(topics[0].title);
+    expect(window.localStorage.getItem(THREAD_STORAGE_KEY)).toBe(
+      newProject.thread_id,
+    );
+  });
+
+  it("keeps the user-selected history thread when startup restore resolves later", async () => {
+    const user = userEvent.setup();
+    const startupThreadId = "startup-thread-a";
+    const selectedThreadId = "selected-thread-b";
+    const startupRestore = deferred<WorkflowResponse>();
+    const historySwitch = deferred<WorkflowResponse>();
+    const selectedProject = projectSummary({
+      thread_id: selectedThreadId,
+      topic_direction: "用户选择的任务 B",
+      status: "waiting_article_review",
+      selected_topic_title: topics[0].title,
+    });
+    window.localStorage.setItem(THREAD_STORAGE_KEY, startupThreadId);
+    mockedListProjects.mockResolvedValue(
+      projectListResponse([selectedProject]),
+    );
+    mockedGetWorkflowState
+      .mockReturnValueOnce(startupRestore.promise)
+      .mockReturnValueOnce(historySwitch.promise);
+
+    render(<App />);
+    await waitFor(() => {
+      expect(mockedGetWorkflowState).toHaveBeenCalledWith(startupThreadId);
+    });
+    await user.click(
+      await screen.findByRole("button", {
+        name: `打开历史任务：${selectedProject.topic_direction}`,
+      }),
+    );
+
+    await act(async () => {
+      historySwitch.resolve(
+        articleReviewResponse(0, "# 用户选择的 B 文章", selectedThreadId),
+      );
+      await historySwitch.promise;
+    });
+    expect(await screen.findByText("用户选择的 B 文章")).toBeInTheDocument();
+
+    await act(async () => {
+      startupRestore.resolve(
+        articleReviewResponse(0, "# 过期的 A 文章", startupThreadId),
+      );
+      await startupRestore.promise;
+    });
+
+    expect(screen.getByText("用户选择的 B 文章")).toBeInTheDocument();
+    expect(screen.queryByText("过期的 A 文章")).not.toBeInTheDocument();
+    expect(window.localStorage.getItem(THREAD_STORAGE_KEY)).toBe(
+      selectedThreadId,
+    );
+  });
+
+  it("keeps the new task page when a pending history switch resolves later", async () => {
+    const user = userEvent.setup();
+    const selectedProject = projectSummary({
+      thread_id: "pending-history-thread-b",
+      topic_direction: "等待返回的任务 B",
+      status: "waiting_article_review",
+      selected_topic_title: topics[0].title,
+    });
+    const historySwitch = deferred<WorkflowResponse>();
+    mockedListProjects.mockResolvedValue(
+      projectListResponse([selectedProject]),
+    );
+    mockedGetWorkflowState.mockReturnValue(historySwitch.promise);
+
+    render(<App />);
+    await user.click(
+      await screen.findByRole("button", {
+        name: `打开历史任务：${selectedProject.topic_direction}`,
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: "新任务" }));
+
+    await act(async () => {
+      historySwitch.resolve(
+        articleReviewResponse(
+          0,
+          "# 不应重新激活的 B 文章",
+          selectedProject.thread_id,
+        ),
+      );
+      await historySwitch.promise;
+    });
+
+    expect(
+      screen.getByRole("heading", { name: "创建今天的内容方向" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("不应重新激活的 B 文章"),
+    ).not.toBeInTheDocument();
+    expect(window.localStorage.getItem(THREAD_STORAGE_KEY)).toBeNull();
+  });
+
+  it("keeps the newest history refresh when the initial request resolves later", async () => {
+    const user = userEvent.setup();
+    const initialHistory = deferred<ProjectListResponse>();
+    const postStartHistory = deferred<ProjectListResponse>();
+    const staleProject = projectSummary({
+      thread_id: "stale-history-thread-a",
+      topic_direction: "过期历史列表 A",
+    });
+    const newestProject = projectSummary({
+      id: "018f0000-0000-7000-8000-000000000099",
+      thread_id: threadId,
+      topic_direction: "最新历史列表 B",
+    });
+    mockedListProjects
+      .mockReturnValueOnce(initialHistory.promise)
+      .mockReturnValueOnce(postStartHistory.promise);
+    mockedStartWorkflow.mockResolvedValue(topicSelectionResponse());
+
+    render(<App />);
+    const directionInput = await screen.findByRole("textbox", {
+      name: "内容方向",
+    });
+    await user.type(directionInput, "LangGraph 异步竞态测试");
+    await user.click(screen.getByRole("button", { name: "生成选题" }));
+    await screen.findByText(topics[0].title);
+    await waitFor(() => expect(mockedListProjects).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      postStartHistory.resolve(projectListResponse([newestProject]));
+      await postStartHistory.promise;
+    });
+    expect(
+      await screen.findByRole("button", {
+        name: `打开历史任务：${newestProject.topic_direction}`,
+      }),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      initialHistory.resolve(projectListResponse([staleProject]));
+      await initialHistory.promise;
+    });
+
+    expect(
+      screen.getByRole("button", {
+        name: `打开历史任务：${newestProject.topic_direction}`,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", {
+        name: `打开历史任务：${staleProject.topic_direction}`,
+      }),
+    ).not.toBeInTheDocument();
   });
 });

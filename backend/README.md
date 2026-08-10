@@ -57,6 +57,17 @@ PostgreSQL 模式会在应用启动时运行 LangGraph Checkpointer 的 `setup()
 
 LangGraph 自动维护的 checkpoint 表只保存工作流执行状态，不是项目的业务历史表或任务列表。
 
+## 历史任务
+
+PostgreSQL 模式下，应用同时维护两类彼此隔离的数据：
+
+- LangGraph Checkpointer 管理 `checkpoints`、`checkpoint_blobs`、`checkpoint_writes` 和 `checkpoint_migrations`，它们是工作流状态的唯一真源。
+- SQLAlchemy 管理 `content_projects`，只保存历史列表所需的摘要、状态和 `thread_id`，不复制文章、视觉知识点或图片地址。
+
+`GET /api/v1/projects` 支持 `limit`、`offset`，用于返回按最近业务更新时间排序的轻量历史列表。前端历史侧栏点击任务后，仍通过 `GET /api/v1/workflows/{thread_id}/state` 从 checkpoint 恢复完整状态。
+
+当前 MVP 在应用启动时使用 SQLAlchemy `metadata.create_all()` 初始化 `content_projects`。正式生产环境应改用 Alembic 管理 schema migrations。
+
 Windows 下使用 Psycopg async 连接 PostgreSQL 时，显式使用 SelectorEventLoop 启动 Uvicorn：
 
 ```powershell
@@ -79,4 +90,4 @@ Windows 下使用 Psycopg async 连接 PostgreSQL 时，显式使用 SelectorEve
 
 ## 当前限制
 
-图片生成仍为 Mock。Memory Checkpointer 仅适用于单进程开发和测试；持久化部署应使用 PostgreSQL 模式。
+图片生成仍为 Mock。Memory Checkpointer 仅适用于单进程开发和测试；持久化工作流与历史列表需要 PostgreSQL 模式。

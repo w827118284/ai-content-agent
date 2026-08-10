@@ -1,4 +1,5 @@
 import type {
+  ProjectListResponse,
   WorkflowResponse,
   WorkflowResumeRequest,
 } from "../types/workflow";
@@ -103,4 +104,15 @@ export function getWorkflowState(
   return request<WorkflowResponse>(
     `/api/v1/workflows/${encodeURIComponent(threadId)}/state`,
   );
+}
+
+export function listProjects(
+  limit = 20,
+  offset = 0,
+): Promise<ProjectListResponse> {
+  const query = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+  });
+  return request<ProjectListResponse>(`/api/v1/projects?${query.toString()}`);
 }

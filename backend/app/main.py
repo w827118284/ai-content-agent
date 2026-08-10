@@ -4,16 +4,19 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.v1.projects import router as projects_router
 from app.api.v1.workflows import router as workflows_router
 from app.core.config import settings
+from app.core.database import business_database_runtime
 from app.graph.runtime import workflow_runtime
 from app.schemas.workflow import HealthResponse
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    async with workflow_runtime(settings):
-        yield
+    async with business_database_runtime(settings):
+        async with workflow_runtime(settings):
+            yield
 
 
 app = FastAPI(
@@ -29,6 +32,7 @@ app.add_middleware(
     allow_headers=["Content-Type"],
 )
 app.include_router(workflows_router, prefix=settings.api_v1_prefix)
+app.include_router(projects_router, prefix=settings.api_v1_prefix)
 
 
 @app.get("/health", response_model=HealthResponse, tags=["health"])

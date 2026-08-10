@@ -54,6 +54,24 @@ export interface WorkflowResponse {
   state: AgentState;
 }
 
+export interface ContentProjectSummary {
+  id: string;
+  thread_id: string;
+  topic_direction: string;
+  selected_topic_title: string | null;
+  status: WorkflowStatus;
+  revision_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProjectListResponse {
+  items: ContentProjectSummary[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 export type WorkflowResumeRequest =
   | {
       action: "select_topic";

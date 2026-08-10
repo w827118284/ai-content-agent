@@ -1,23 +1,24 @@
-import {
-  Bot,
-  LoaderCircle,
-  RefreshCw,
-  X,
-} from "lucide-react";
-import { useEffect, useState } from "react";
+import { Bot, LoaderCircle, RefreshCw, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   getWorkflowState,
+  listProjects,
   resumeWorkflow,
   startWorkflow,
   WorkflowApiError,
 } from "./api/workflows";
 import { ArticleReview } from "./components/ArticleReview";
+import { HistorySidebar } from "./components/HistorySidebar";
 import { ResultView } from "./components/ResultView";
 import { StartPanel } from "./components/StartPanel";
 import { TopicSelection } from "./components/TopicSelection";
 import { WorkflowProgress } from "./components/WorkflowProgress";
-import type { WorkflowResponse, WorkflowStatus } from "./types/workflow";
+import type {
+  ContentProjectSummary,
+  WorkflowResponse,
+  WorkflowStatus,
+} from "./types/workflow";
 
 export const THREAD_STORAGE_KEY = "content_agent_thread_id";
 
@@ -41,11 +42,52 @@ function errorMessage(error: unknown): string {
 
 export default function App() {
   const [workflow, setWorkflow] = useState<WorkflowResponse | null>(null);
+  const [projects, setProjects] = useState<ContentProjectSummary[]>([]);
+  const [projectTotal, setProjectTotal] = useState(0);
   const [busy, setBusy] = useState(false);
   const [restoring, setRestoring] = useState(true);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [switchingThreadId, setSwitchingThreadId] = useState<string | null>(
+    null,
+  );
   const [error, setError] = useState<string | null>(null);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const workflowLoadGeneration = useRef(0);
+  const historyRefreshGeneration = useRef(0);
+
+  const refreshHistory = useCallback(
+    async (initialLoad = false): Promise<void> => {
+      const refreshGeneration = ++historyRefreshGeneration.current;
+      if (initialLoad) {
+        setHistoryLoading(true);
+      }
+      try {
+        const response = await listProjects();
+        if (refreshGeneration !== historyRefreshGeneration.current) {
+          return;
+        }
+        setProjects(response.items);
+        setProjectTotal(response.total);
+        setHistoryError(null);
+      } catch {
+        if (refreshGeneration !== historyRefreshGeneration.current) {
+          return;
+        }
+        setHistoryError(
+          initialLoad ? "历史记录加载失败" : "历史记录刷新失败",
+        );
+      } finally {
+        if (refreshGeneration === historyRefreshGeneration.current) {
+          setHistoryLoading(false);
+        }
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
+    void refreshHistory(true);
+
     const storedThreadId = window.localStorage.getItem(THREAD_STORAGE_KEY);
     if (!storedThreadId) {
       setRestoring(false);
@@ -53,15 +95,23 @@ export default function App() {
     }
 
     let cancelled = false;
+    const loadGeneration = ++workflowLoadGeneration.current;
 
     getWorkflowState(storedThreadId)
       .then((response) => {
-        if (!cancelled) {
-          setWorkflow(response);
+        if (
+          cancelled ||
+          loadGeneration !== workflowLoadGeneration.current
+        ) {
+          return;
         }
+        setWorkflow(response);
       })
       .catch((requestError: unknown) => {
-        if (cancelled) {
+        if (
+          cancelled ||
+          loadGeneration !== workflowLoadGeneration.current
+        ) {
           return;
         }
         if (
@@ -74,7 +124,10 @@ export default function App() {
         setError(errorMessage(requestError));
       })
       .finally(() => {
-        if (!cancelled) {
+        if (
+          !cancelled &&
+          loadGeneration === workflowLoadGeneration.current
+        ) {
           setRestoring(false);
         }
       });
@@ -82,7 +135,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [refreshHistory]);
 
   function applyWorkflow(response: WorkflowResponse) {
     setWorkflow(response);
@@ -99,6 +152,7 @@ export default function App() {
     setError(null);
     try {
       applyWorkflow(await request());
+      void refreshHistory();
     } catch (requestError) {
       setError(errorMessage(requestError));
     } finally {
@@ -143,11 +197,41 @@ export default function App() {
     );
   }
 
+  async function handleOpenProject(project: ContentProjectSummary) {
+    if (busy || switchingThreadId !== null) {
+      return;
+    }
+
+    const loadGeneration = ++workflowLoadGeneration.current;
+    setSwitchingThreadId(project.thread_id);
+    setError(null);
+    try {
+      const response = await getWorkflowState(project.thread_id);
+      if (loadGeneration !== workflowLoadGeneration.current) {
+        return;
+      }
+      applyWorkflow(response);
+    } catch (requestError) {
+      if (loadGeneration !== workflowLoadGeneration.current) {
+        return;
+      }
+      setError(errorMessage(requestError));
+    } finally {
+      if (loadGeneration === workflowLoadGeneration.current) {
+        setSwitchingThreadId(null);
+        setRestoring(false);
+      }
+    }
+  }
+
   function handleNewTask() {
+    workflowLoadGeneration.current += 1;
     window.localStorage.removeItem(THREAD_STORAGE_KEY);
     setWorkflow(null);
     setError(null);
     setBusy(false);
+    setRestoring(false);
+    setSwitchingThreadId(null);
   }
 
   function renderWorkflow() {
@@ -235,34 +319,50 @@ export default function App() {
       </header>
 
       <main className="main-content">
-        {error ? (
-          <div className="error-banner" role="alert">
-            <span>{error}</span>
-            <button
-              className="icon-button"
-              type="button"
-              onClick={() => setError(null)}
-              aria-label="关闭错误提示"
-              title="关闭"
-            >
-              <X size={17} />
-            </button>
-          </div>
-        ) : null}
+        <div className="workspace-layout">
+          <HistorySidebar
+            projects={projects}
+            total={projectTotal}
+            activeThreadId={workflow?.thread_id ?? null}
+            loading={historyLoading}
+            error={historyError}
+            switchingThreadId={switchingThreadId}
+            onOpenProject={(project) => void handleOpenProject(project)}
+            onNewTask={handleNewTask}
+            onRefresh={() => void refreshHistory(true)}
+          />
 
-        {restoring ? (
-          <div className="restore-state" role="status">
-            <RefreshCw className="spin" size={24} aria-hidden="true" />
-            <span>正在恢复最近任务</span>
+          <div className="workspace-main">
+            {error ? (
+              <div className="error-banner" role="alert">
+                <span>{error}</span>
+                <button
+                  className="icon-button"
+                  type="button"
+                  onClick={() => setError(null)}
+                  aria-label="关闭错误提示"
+                  title="关闭"
+                >
+                  <X size={17} />
+                </button>
+              </div>
+            ) : null}
+
+            {restoring ? (
+              <div className="restore-state" role="status">
+                <RefreshCw className="spin" size={24} aria-hidden="true" />
+                <span>正在恢复最近任务</span>
+              </div>
+            ) : workflow ? (
+              <div className="workbench">
+                <WorkflowProgress status={workflow.status} />
+                <div className="workflow-surface">{renderWorkflow()}</div>
+              </div>
+            ) : (
+              <div className="start-layout">{renderWorkflow()}</div>
+            )}
           </div>
-        ) : workflow ? (
-          <div className="workbench">
-            <WorkflowProgress status={workflow.status} />
-            <div className="workflow-surface">{renderWorkflow()}</div>
-          </div>
-        ) : (
-          <div className="start-layout">{renderWorkflow()}</div>
-        )}
+        </div>
       </main>
     </div>
   );
