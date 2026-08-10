@@ -4,14 +4,14 @@ from langgraph.types import interrupt
 
 from app.graph.state import AgentState
 from app.services.image_mock import MockImageService
-from app.services.llm_mock import MockLLMService
+from app.services.llm_service import get_llm_service
 
 
 class WorkflowNodeInputError(ValueError):
     """Raised when a human resume payload is invalid for the paused node."""
 
 
-llm_service = MockLLMService()
+llm_service = get_llm_service()
 image_service = MockImageService()
 
 
