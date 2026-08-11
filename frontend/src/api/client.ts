@@ -1,10 +1,22 @@
 import { getAccessToken } from "../auth/token";
 
 
-const configuredBaseUrl =
-  import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
+const API_V1_PREFIX = "/api/v1";
+const DEFAULT_API_ORIGIN = "http://127.0.0.1:8000";
 
-export const API_BASE_URL = configuredBaseUrl.replace(/\/$/, "");
+export function normalizeApiBaseUrl(configuredBaseUrl?: string): string {
+  const baseUrl = (configuredBaseUrl?.trim() || DEFAULT_API_ORIGIN).replace(
+    /\/+$/,
+    "",
+  );
+  return baseUrl.endsWith(API_V1_PREFIX)
+    ? baseUrl
+    : `${baseUrl}${API_V1_PREFIX}`;
+}
+
+export const API_BASE_URL = normalizeApiBaseUrl(
+  import.meta.env.VITE_API_BASE_URL,
+);
 export const AUTH_UNAUTHORIZED_EVENT = "content-agent:unauthorized";
 
 export class ApiError extends Error {

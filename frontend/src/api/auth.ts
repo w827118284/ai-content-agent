@@ -9,7 +9,7 @@ interface Credentials {
 
 export function registerUser(credentials: Credentials): Promise<AuthUser> {
   return apiRequest<AuthUser>(
-    "/api/v1/auth/register",
+    "/auth/register",
     {
       method: "POST",
       body: JSON.stringify(credentials),
@@ -22,7 +22,7 @@ export function loginUser(
   credentials: Credentials,
 ): Promise<AccessTokenResponse> {
   return apiRequest<AccessTokenResponse>(
-    "/api/v1/auth/login",
+    "/auth/login",
     {
       method: "POST",
       body: JSON.stringify(credentials),
@@ -33,7 +33,7 @@ export function loginUser(
 
 export function getCurrentUser(accessToken?: string): Promise<AuthUser> {
   return apiRequest<AuthUser>(
-    "/api/v1/auth/me",
+    "/auth/me",
     {},
     { authenticated: true, authToken: accessToken },
   );

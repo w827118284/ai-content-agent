@@ -2,10 +2,25 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ACCESS_TOKEN_STORAGE_KEY } from "../auth/token";
 import {
+  API_BASE_URL,
   apiRequest,
   ApiError,
   AUTH_UNAUTHORIZED_EVENT,
+  normalizeApiBaseUrl,
 } from "./client";
+
+
+describe("API base URL", () => {
+  it("adds the API prefix to the local development origin", () => {
+    expect(normalizeApiBaseUrl("http://127.0.0.1:8000")).toBe(
+      "http://127.0.0.1:8000/api/v1",
+    );
+  });
+
+  it("keeps the production relative API prefix without duplicating it", () => {
+    expect(normalizeApiBaseUrl("/api/v1/")).toBe("/api/v1");
+  });
+});
 
 
 describe("API client authentication", () => {
@@ -27,8 +42,9 @@ describe("API client authentication", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    await apiRequest<{ ok: boolean }>("/api/v1/projects");
+    await apiRequest<{ ok: boolean }>("/projects");
 
+    expect(fetchMock.mock.calls[0][0]).toBe(`${API_BASE_URL}/projects`);
     const requestInit = fetchMock.mock.calls[0][1] as RequestInit;
     expect(new Headers(requestInit.headers).get("Authorization")).toBe(
       "Bearer header-test-token",
@@ -42,7 +58,7 @@ describe("API client authentication", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    await apiRequest("/api/v1/auth/register", {}, { authenticated: false });
+    await apiRequest("/auth/register", {}, { authenticated: false });
 
     const requestInit = fetchMock.mock.calls[0][1] as RequestInit;
     expect(new Headers(requestInit.headers).has("Authorization")).toBe(false);
@@ -59,7 +75,7 @@ describe("API client authentication", () => {
       ),
     );
 
-    await expect(apiRequest("/api/v1/projects")).rejects.toEqual(
+    await expect(apiRequest("/projects")).rejects.toEqual(
       new ApiError(401, "expired"),
     );
     expect(listener).toHaveBeenCalledOnce();
@@ -76,7 +92,7 @@ describe("API client authentication", () => {
     window.addEventListener(AUTH_UNAUTHORIZED_EVENT, listener);
     vi.stubGlobal("fetch", vi.fn().mockReturnValue(pendingRequest));
 
-    const request = apiRequest("/api/v1/projects");
+    const request = apiRequest("/projects");
     window.localStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, "token-B");
     resolveRequest(
       new Response(JSON.stringify({ detail: "expired" }), { status: 401 }),

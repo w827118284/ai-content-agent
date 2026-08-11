@@ -13,7 +13,7 @@ npm install
 npm run dev
 ```
 
-默认访问 `http://localhost:5173`，API 地址通过 `VITE_API_BASE_URL` 配置。
+默认访问 `http://localhost:5173`，API 地址通过 `VITE_API_BASE_URL` 配置。本地开发推荐使用 `http://127.0.0.1:8000/api/v1`；Docker production build 使用同源 `/api/v1`。client 仍兼容只配置 origin 的旧值，并确保不会重复拼接 `/api/v1`。
 
 当前本地学习版将 Access Token 保存到 localStorage。生产环境若对 XSS 风险有更高要求，应评估 `HttpOnly + Secure + SameSite` Cookie，并同步设计 CSRF 与 CORS 策略。本阶段仍使用 Authorization header，不启用 cookie credentials；Markdown 渲染也未启用 raw HTML。
 

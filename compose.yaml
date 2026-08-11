@@ -1,0 +1,93 @@
+name: ai-content-agent
+
+x-backend-common: &backend-common
+  image: ai-content-agent-backend:phase8
+  build:
+    context: ./backend
+  environment:
+    CHECKPOINTER_BACKEND: ${CHECKPOINTER_BACKEND:-postgres}
+    DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in .env.docker}
+    LANGGRAPH_STRICT_MSGPACK: ${LANGGRAPH_STRICT_MSGPACK:-true}
+    JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set in .env.docker}
+    JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: ${JWT_ACCESS_TOKEN_EXPIRE_MINUTES:-60}
+    CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
+    USE_MOCK_LLM: ${USE_MOCK_LLM:-true}
+    LLM_API_KEY: ${LLM_API_KEY:-}
+    LLM_BASE_URL: ${LLM_BASE_URL:-}
+    LLM_MODEL: ${LLM_MODEL:-}
+    LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.2}
+    USE_MOCK_IMAGE: ${USE_MOCK_IMAGE:-true}
+    IMAGE_API_KEY: ${IMAGE_API_KEY:-}
+    IMAGE_BASE_URL: ${IMAGE_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}
+    IMAGE_MODEL: ${IMAGE_MODEL:-doubao-seedream-5-0-260128}
+    IMAGE_SIZE: ${IMAGE_SIZE:-2K}
+    IMAGE_WATERMARK: ${IMAGE_WATERMARK:-true}
+    IMAGE_MAX_CONCURRENCY: ${IMAGE_MAX_CONCURRENCY:-3}
+
+services:
+  db:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB must be set in .env.docker}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER must be set in .env.docker}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env.docker}
+    expose:
+      - "5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  migrate:
+    <<: *backend-common
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  backend:
+    <<: *backend-common
+    restart: unless-stopped
+    expose:
+      - "8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).close()
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  frontend:
+    image: ai-content-agent-frontend:phase8
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api/v1}
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
+volumes:
+  postgres_data:

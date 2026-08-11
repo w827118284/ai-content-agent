@@ -9,7 +9,7 @@ import { ApiError, apiRequest } from "./client";
 export { ApiError as WorkflowApiError };
 
 export function startWorkflow(topicDirection: string): Promise<WorkflowResponse> {
-  return apiRequest<WorkflowResponse>("/api/v1/workflows/start", {
+  return apiRequest<WorkflowResponse>("/workflows/start", {
     method: "POST",
     body: JSON.stringify({ topic_direction: topicDirection }),
   });
@@ -20,7 +20,7 @@ export function resumeWorkflow(
   body: WorkflowResumeRequest,
 ): Promise<WorkflowResponse> {
   return apiRequest<WorkflowResponse>(
-    `/api/v1/workflows/${encodeURIComponent(threadId)}/resume`,
+    `/workflows/${encodeURIComponent(threadId)}/resume`,
     {
       method: "POST",
       body: JSON.stringify(body),
@@ -32,7 +32,7 @@ export function getWorkflowState(
   threadId: string,
 ): Promise<WorkflowResponse> {
   return apiRequest<WorkflowResponse>(
-    `/api/v1/workflows/${encodeURIComponent(threadId)}/state`,
+    `/workflows/${encodeURIComponent(threadId)}/state`,
   );
 }
 
@@ -44,5 +44,5 @@ export function listProjects(
     limit: String(limit),
     offset: String(offset),
   });
-  return apiRequest<ProjectListResponse>(`/api/v1/projects?${query.toString()}`);
+  return apiRequest<ProjectListResponse>(`/projects?${query.toString()}`);
 }
