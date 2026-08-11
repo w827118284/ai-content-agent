@@ -71,7 +71,7 @@ class Settings(BaseSettings):
         default="gpt-image-2",
         validation_alias="IMAGE_MODEL",
     )
-    image_size: str = Field(default="1280x1280", validation_alias="IMAGE_SIZE")
+    image_size: str = Field(default="1008x1344", validation_alias="IMAGE_SIZE")
     image_quality: str = Field(default="auto", validation_alias="IMAGE_QUALITY")
     image_output_format: Literal["png", "jpeg", "webp"] = Field(
         default="png",

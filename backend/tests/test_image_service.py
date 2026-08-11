@@ -39,7 +39,7 @@ def build_service(tmp_path, *, max_concurrency: int = 3, response=None):
         api_key="unit-test-image-key",
         base_url="https://unit.invalid/v1",
         model="unit-test-image-model",
-        size="1280x1280",
+        size="1008x1344",
         quality="auto",
         output_format="png",
         moderation="auto",
@@ -61,7 +61,7 @@ def test_image_settings_default_to_mock():
     assert configured.image_api_key is None
     assert configured.image_base_url == "https://api.iotwq.top/v1"
     assert configured.image_model == "gpt-image-2"
-    assert configured.image_size == "1280x1280"
+    assert configured.image_size == "1008x1344"
     assert configured.resolved_image_output_dir.name == "images"
     assert configured.resolved_image_output_dir.parent.name == "outputs"
     assert configured.image_n == 1
@@ -73,7 +73,7 @@ def test_image_settings_read_real_mode_environment(monkeypatch):
     monkeypatch.setenv("IMAGE_API_KEY", "unit-test-image-key")
     monkeypatch.setenv("IMAGE_BASE_URL", "https://unit.invalid/v1")
     monkeypatch.setenv("IMAGE_MODEL", "unit-test-image-model")
-    monkeypatch.setenv("IMAGE_SIZE", "1280x1280")
+    monkeypatch.setenv("IMAGE_SIZE", "1008x1344")
     monkeypatch.setenv("IMAGE_QUALITY", "auto")
     monkeypatch.setenv("IMAGE_OUTPUT_FORMAT", "webp")
     monkeypatch.setenv("IMAGE_MODERATION", "auto")
@@ -109,7 +109,7 @@ def test_selector_uses_mock_or_configured_openai_provider(monkeypatch):
         service = get_image_service()
 
     assert isinstance(service, OpenAIImageService)
-    assert service.size == "1280x1280"
+    assert service.size == "1008x1344"
     assert openai.call_args.kwargs["max_retries"] == 0
 
 
@@ -138,7 +138,7 @@ def test_generate_image_decodes_b64_and_persists_public_url(tmp_path):
     assert kwargs == {
         "model": "unit-test-image-model",
         "prompt": kwargs["prompt"],
-        "size": "1280x1280",
+        "size": "1008x1344",
         "quality": "auto",
         "output_format": "png",
         "moderation": "auto",

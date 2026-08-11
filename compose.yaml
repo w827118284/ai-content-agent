@@ -20,7 +20,7 @@ x-backend-common: &backend-common
     IMAGE_API_KEY: ${IMAGE_API_KEY:-}
     IMAGE_BASE_URL: ${IMAGE_BASE_URL:-https://api.iotwq.top/v1}
     IMAGE_MODEL: ${IMAGE_MODEL:-gpt-image-2}
-    IMAGE_SIZE: ${IMAGE_SIZE:-1280x1280}
+    IMAGE_SIZE: ${IMAGE_SIZE:-1008x1344}
     IMAGE_QUALITY: ${IMAGE_QUALITY:-auto}
     IMAGE_OUTPUT_FORMAT: ${IMAGE_OUTPUT_FORMAT:-png}
     IMAGE_MODERATION: ${IMAGE_MODERATION:-auto}
