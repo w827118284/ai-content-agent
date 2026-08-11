@@ -1,4 +1,5 @@
-from typing import Any
+from collections.abc import AsyncIterator
+from typing import Any, Literal, TypedDict
 from uuid import uuid4
 
 from langgraph.types import Command
@@ -18,6 +19,19 @@ class WorkflowConflictError(RuntimeError):
 
 class WorkflowValidationError(ValueError):
     pass
+
+
+class WorkflowProgressUpdate(TypedDict):
+    type: Literal["progress"]
+    node: str
+
+
+class WorkflowResultUpdate(TypedDict):
+    type: Literal["result"]
+    result: dict[str, Any]
+
+
+WorkflowStreamUpdate = WorkflowProgressUpdate | WorkflowResultUpdate
 
 
 def _graph_config(thread_id: str) -> dict[str, dict[str, str]]:
@@ -114,6 +128,24 @@ async def resume_workflow(
     thread_id: str,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
+    command = await prepare_resume_workflow(thread_id, payload)
+
+    try:
+        await get_content_workflow().ainvoke(
+            command,
+            config=_graph_config(thread_id),
+        )
+    except WorkflowNodeInputError as exc:
+        raise WorkflowValidationError(str(exc)) from exc
+
+    updated_snapshot = await _get_snapshot(thread_id)
+    return _result_from_snapshot(thread_id, updated_snapshot)
+
+
+async def prepare_resume_workflow(
+    thread_id: str,
+    payload: dict[str, Any],
+) -> Command[Any]:
     snapshot = await _get_snapshot(thread_id)
     current_interrupt = _extract_interrupt(snapshot)
     if current_interrupt is None:
@@ -126,17 +158,50 @@ async def resume_workflow(
             f"workflow 当前等待 {expected_type}，不能提交 {requested_type} 操作"
         )
     _validate_resume_payload(snapshot, requested_type, payload)
+    return Command(resume=payload)
 
+
+async def stream_workflow(
+    thread_id: str,
+    graph_input: AgentState | Command[Any],
+) -> AsyncIterator[WorkflowStreamUpdate]:
     try:
-        await get_content_workflow().ainvoke(
-            Command(resume=payload),
+        async for part in get_content_workflow().astream(
+            graph_input,
             config=_graph_config(thread_id),
-        )
+            stream_mode="updates",
+            version="v2",
+        ):
+            if part.get("type") != "updates":
+                continue
+            data = part.get("data")
+            if not isinstance(data, dict):
+                continue
+            for node in data:
+                if node != "__interrupt__":
+                    yield {"type": "progress", "node": node}
     except WorkflowNodeInputError as exc:
         raise WorkflowValidationError(str(exc)) from exc
 
     updated_snapshot = await _get_snapshot(thread_id)
-    return _result_from_snapshot(thread_id, updated_snapshot)
+    yield {
+        "type": "result",
+        "result": _result_from_snapshot(thread_id, updated_snapshot),
+    }
+
+
+def stream_start_workflow(
+    topic_direction: str,
+    thread_id: str,
+) -> AsyncIterator[WorkflowStreamUpdate]:
+    return stream_workflow(thread_id, _initial_state(topic_direction))
+
+
+def stream_resume_workflow(
+    thread_id: str,
+    command: Command[Any],
+) -> AsyncIterator[WorkflowStreamUpdate]:
+    return stream_workflow(thread_id, command)
 
 
 async def get_workflow_state(thread_id: str) -> dict[str, Any]:

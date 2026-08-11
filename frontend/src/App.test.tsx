@@ -9,7 +9,9 @@ import {
   getWorkflowState,
   listProjects,
   resumeWorkflow,
+  resumeWorkflowStream,
   startWorkflow,
+  startWorkflowStream,
   WorkflowApiError,
 } from "./api/workflows";
 import { ACCESS_TOKEN_STORAGE_KEY } from "./auth/token";
@@ -30,6 +32,8 @@ vi.mock("./api/workflows", async () => {
     ...actual,
     startWorkflow: vi.fn(),
     resumeWorkflow: vi.fn(),
+    startWorkflowStream: vi.fn(),
+    resumeWorkflowStream: vi.fn(),
     getWorkflowState: vi.fn(),
     listProjects: vi.fn(),
   };
@@ -43,6 +47,8 @@ vi.mock("./api/auth", () => ({
 
 const mockedStartWorkflow = vi.mocked(startWorkflow);
 const mockedResumeWorkflow = vi.mocked(resumeWorkflow);
+const mockedStartWorkflowStream = vi.mocked(startWorkflowStream);
+const mockedResumeWorkflowStream = vi.mocked(resumeWorkflowStream);
 const mockedGetWorkflowState = vi.mocked(getWorkflowState);
 const mockedListProjects = vi.mocked(listProjects);
 const mockedGetCurrentUser = vi.mocked(getCurrentUser);
@@ -175,6 +181,30 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+function installDefaultStreamMocks() {
+  mockedStartWorkflowStream.mockImplementation(async (direction, options) => {
+    const response = await mockedStartWorkflow(direction);
+    if (!options.signal.aborted) {
+      options.onEvent({
+        type: "meta",
+        data: { thread_id: response.thread_id, action: "start" },
+      });
+      options.onEvent({ type: "interrupt", data: response });
+    }
+  });
+  mockedResumeWorkflowStream.mockImplementation(
+    async (responseThreadId, body, options) => {
+      const response = await mockedResumeWorkflow(responseThreadId, body);
+      if (!options.signal.aborted) {
+        options.onEvent({
+          type: response.is_completed ? "completed" : "interrupt",
+          data: response,
+        });
+      }
+    },
+  );
+}
+
 async function startFromInitialPage(user: ReturnType<typeof userEvent.setup>) {
   render(<App />);
   const directionInput = await screen.findByRole("textbox", {
@@ -192,6 +222,7 @@ describe("AI content workflow", () => {
     window.localStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, "test-access-token");
     mockedGetCurrentUser.mockResolvedValue(authUser);
     mockedListProjects.mockResolvedValue(projectListResponse([]));
+    installDefaultStreamMocks();
   });
 
   it("starts a workflow and shows five topics", async () => {
@@ -207,6 +238,82 @@ describe("AI content workflow", () => {
       expect(screen.getByText(topic.title)).toBeInTheDocument();
     }
     expect(window.localStorage.getItem(THREAD_STORAGE_KEY)).toBe(threadId);
+  });
+
+  it("shows real stream progress before applying an interrupt", async () => {
+    const user = userEvent.setup();
+    const streamReady = deferred<
+      Parameters<typeof startWorkflowStream>[1]
+    >();
+    const streamFinished = deferred<void>();
+    mockedStartWorkflowStream.mockImplementation(async (_direction, options) => {
+      streamReady.resolve(options);
+      await streamFinished.promise;
+    });
+
+    render(<App />);
+    await user.type(
+      await screen.findByRole("textbox", { name: "内容方向" }),
+      "LangGraph SSE",
+    );
+    await user.click(screen.getByRole("button", { name: "生成选题" }));
+    const options = await streamReady.promise;
+    act(() => {
+      options.onEvent({
+        type: "meta",
+        data: { thread_id: threadId, action: "start" },
+      });
+      options.onEvent({
+        type: "progress",
+        data: {
+          thread_id: threadId,
+          node: "plan_topics",
+          status: "completed",
+          message: "选题生成完成",
+        },
+      });
+    });
+
+    expect(await screen.findByText("AI 正在处理")).toBeInTheDocument();
+    expect(screen.getByText("选题生成完成")).toBeInTheDocument();
+
+    await act(async () => {
+      options.onEvent({ type: "interrupt", data: topicSelectionResponse() });
+      streamFinished.resolve();
+      await streamFinished.promise;
+    });
+    expect(await screen.findByText(topics[0].title)).toBeInTheDocument();
+    expect(screen.queryByText("AI 正在处理")).not.toBeInTheDocument();
+  });
+
+  it("stops loading and shows a sanitized stream error", async () => {
+    const user = userEvent.setup();
+    mockedStartWorkflowStream.mockImplementation(async (_direction, options) => {
+      options.onEvent({
+        type: "meta",
+        data: { thread_id: threadId, action: "start" },
+      });
+      options.onEvent({
+        type: "error",
+        data: {
+          thread_id: threadId,
+          code: "workflow_stream_failed",
+          message: "工作流执行失败，请稍后重试",
+        },
+      });
+    });
+
+    render(<App />);
+    await user.type(
+      await screen.findByRole("textbox", { name: "内容方向" }),
+      "异常测试",
+    );
+    await user.click(screen.getByRole("button", { name: "生成选题" }));
+
+    expect(
+      await screen.findByText("工作流执行失败，请稍后重试"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("AI 正在处理")).not.toBeInTheDocument();
   });
 
   it("selects a topic and shows the article review page", async () => {
@@ -578,6 +685,59 @@ describe("AI content workflow", () => {
     );
   });
 
+  it("aborts stream A and ignores its later events after switching to history B", async () => {
+    const user = userEvent.setup();
+    const projectB = projectSummary({
+      thread_id: "history-thread-b",
+      topic_direction: "历史任务 B",
+      status: "waiting_article_review",
+    });
+    const streamReady = deferred<
+      Parameters<typeof startWorkflowStream>[1]
+    >();
+    mockedListProjects.mockResolvedValue(projectListResponse([projectB]));
+    mockedGetWorkflowState.mockResolvedValue(
+      articleReviewResponse(0, "# B 文章", projectB.thread_id),
+    );
+    mockedStartWorkflowStream.mockImplementation((_direction, options) => {
+      streamReady.resolve(options);
+      return new Promise<void>((_resolve, reject) => {
+        options.signal.addEventListener("abort", () => {
+          reject(new DOMException("aborted", "AbortError"));
+        });
+      });
+    });
+
+    render(<App />);
+    await user.type(
+      await screen.findByRole("textbox", { name: "内容方向" }),
+      "任务 A",
+    );
+    await user.click(screen.getByRole("button", { name: "生成选题" }));
+    const streamOptions = await streamReady.promise;
+    await user.click(
+      await screen.findByRole("button", {
+        name: `打开历史任务：${projectB.topic_direction}`,
+      }),
+    );
+
+    expect(await screen.findByText("B 文章")).toBeInTheDocument();
+    expect(streamOptions.signal.aborted).toBe(true);
+    act(() => {
+      streamOptions.onEvent({
+        type: "interrupt",
+        data: topicSelectionResponse("stream-thread-a"),
+      });
+    });
+    expect(screen.getByText("B 文章")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: `选择选题：${topics[0].title}` }),
+    ).not.toBeInTheDocument();
+    expect(window.localStorage.getItem(THREAD_STORAGE_KEY)).toBe(
+      projectB.thread_id,
+    );
+  });
+
   it("keeps the user-selected history thread when startup restore resolves later", async () => {
     const user = userEvent.setup();
     const startupThreadId = "startup-thread-a";
@@ -733,6 +893,7 @@ describe("authentication lifecycle", () => {
     vi.clearAllMocks();
     mockedGetCurrentUser.mockResolvedValue(authUser);
     mockedListProjects.mockResolvedValue(projectListResponse([]));
+    installDefaultStreamMocks();
   });
 
   it("shows login UI when no token exists", async () => {
@@ -844,6 +1005,7 @@ describe("authentication lifecycle", () => {
     );
     await user.click(screen.getByRole("button", { name: "生成选题" }));
     await user.click(screen.getByRole("button", { name: "退出登录" }));
+    expect(mockedStartWorkflowStream.mock.calls[0][1].signal.aborted).toBe(true);
 
     mockedLoginUser.mockResolvedValue({
       access_token: "user-b-token",

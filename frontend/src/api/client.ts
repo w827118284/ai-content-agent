@@ -29,7 +29,7 @@ export class ApiError extends Error {
   }
 }
 
-interface ApiRequestOptions {
+export interface ApiRequestOptions {
   authenticated?: boolean;
   authToken?: string;
 }
@@ -58,11 +58,11 @@ function detailMessage(payload: unknown): string | null {
   return messages.length > 0 ? messages.join("；") : null;
 }
 
-export async function apiRequest<T>(
+export async function apiResponse(
   path: string,
   init: RequestInit = {},
   options: ApiRequestOptions = {},
-): Promise<T> {
+): Promise<Response> {
   const authenticated = options.authenticated ?? true;
   const token = options.authToken ?? (authenticated ? getAccessToken() : null);
   const headers = new Headers(init.headers);
@@ -80,8 +80,8 @@ export async function apiRequest<T>(
     throw new ApiError(0, "无法连接后端服务。");
   }
 
-  const payload = (await response.json().catch(() => null)) as unknown;
   if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as unknown;
     if (
       response.status === 401 &&
       authenticated &&
@@ -94,5 +94,15 @@ export async function apiRequest<T>(
       detailMessage(payload) ?? `请求失败（${response.status}）`,
     );
   }
+  return response;
+}
+
+export async function apiRequest<T>(
+  path: string,
+  init: RequestInit = {},
+  options: ApiRequestOptions = {},
+): Promise<T> {
+  const response = await apiResponse(path, init, options);
+  const payload = (await response.json().catch(() => null)) as unknown;
   return payload as T;
 }

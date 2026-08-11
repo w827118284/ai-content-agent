@@ -13,8 +13,8 @@ import { AUTH_UNAUTHORIZED_EVENT } from "./api/client";
 import {
   getWorkflowState,
   listProjects,
-  resumeWorkflow,
-  startWorkflow,
+  resumeWorkflowStream,
+  startWorkflowStream,
   WorkflowApiError,
 } from "./api/workflows";
 import {
@@ -28,12 +28,15 @@ import { HistorySidebar } from "./components/HistorySidebar";
 import { ResultView } from "./components/ResultView";
 import { StartPanel } from "./components/StartPanel";
 import { TopicSelection } from "./components/TopicSelection";
+import { WorkflowLiveProgress } from "./components/WorkflowLiveProgress";
 import { WorkflowProgress } from "./components/WorkflowProgress";
 import type { AuthUser } from "./types/auth";
 import type {
   ContentProjectSummary,
+  WorkflowProgressEvent,
   WorkflowResponse,
   WorkflowStatus,
+  WorkflowStreamEvent,
 } from "./types/workflow";
 
 export const THREAD_STORAGE_KEY = "content_agent_thread_id";
@@ -73,15 +76,25 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
   );
   const [error, setError] = useState<string | null>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [streamProgress, setStreamProgress] = useState<
+    WorkflowProgressEvent[]
+  >([]);
   const workflowLoadGeneration = useRef(0);
   const historyRefreshGeneration = useRef(0);
+  const streamController = useRef<AbortController | null>(null);
+
+  const abortActiveStream = useCallback(() => {
+    streamController.current?.abort();
+    streamController.current = null;
+  }, []);
 
   useEffect(() => {
     return () => {
+      abortActiveStream();
       workflowLoadGeneration.current += 1;
       historyRefreshGeneration.current += 1;
     };
-  }, []);
+  }, [abortActiveStream]);
 
   const refreshHistory = useCallback(
     async (initialLoad = false): Promise<void> => {
@@ -170,47 +183,94 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
     window.localStorage.setItem(THREAD_STORAGE_KEY, response.thread_id);
   }
 
-  async function runRequest(
-    request: () => Promise<WorkflowResponse>,
+  async function runStream(
+    request: (options: {
+      signal: AbortSignal;
+      onEvent: (event: WorkflowStreamEvent) => void;
+    }) => Promise<void>,
+    expectedThreadId: string | null,
   ): Promise<void> {
-    if (busy) {
-      return;
-    }
+    abortActiveStream();
     const requestGeneration = ++workflowLoadGeneration.current;
+    const controller = new AbortController();
+    const sessionToken = getAccessToken();
+    let streamThreadId = expectedThreadId;
+    let terminalReceived = false;
+    streamController.current = controller;
     setBusy(true);
     setError(null);
+    setStreamProgress([]);
+
+    const isCurrent = () =>
+      !controller.signal.aborted &&
+      requestGeneration === workflowLoadGeneration.current &&
+      sessionToken === getAccessToken();
+
     try {
-      const response = await request();
-      if (requestGeneration !== workflowLoadGeneration.current) {
-        return;
+      await request({
+        signal: controller.signal,
+        onEvent: (event) => {
+          if (!isCurrent()) {
+            return;
+          }
+          const eventThreadId = event.data.thread_id;
+          if (event.type === "meta" && streamThreadId === null) {
+            streamThreadId = eventThreadId;
+          }
+          if (streamThreadId === null || eventThreadId !== streamThreadId) {
+            return;
+          }
+
+          if (event.type === "progress") {
+            setStreamProgress((current) => [...current, event.data]);
+          } else if (event.type === "interrupt" || event.type === "completed") {
+            terminalReceived = true;
+            applyWorkflow(event.data);
+            void refreshHistory();
+          } else if (event.type === "error") {
+            terminalReceived = true;
+            setError(event.data.message);
+          }
+        },
+      });
+      if (isCurrent() && !terminalReceived) {
+        setError("工作流事件流意外结束，请从历史任务恢复。");
       }
-      applyWorkflow(response);
-      void refreshHistory();
     } catch (requestError) {
-      if (requestGeneration !== workflowLoadGeneration.current) {
+      if (controller.signal.aborted || !isCurrent()) {
         return;
       }
       setError(errorMessage(requestError));
     } finally {
       if (requestGeneration === workflowLoadGeneration.current) {
         setBusy(false);
+        if (streamController.current === controller) {
+          streamController.current = null;
+        }
       }
     }
   }
 
   async function handleStart(topicDirection: string) {
-    await runRequest(() => startWorkflow(topicDirection));
+    await runStream(
+      (options) => startWorkflowStream(topicDirection, options),
+      null,
+    );
   }
 
   async function handleSelect(topicId: string) {
     if (!workflow) {
       return;
     }
-    await runRequest(() =>
-      resumeWorkflow(workflow.thread_id, {
-        action: "select_topic",
-        data: { topic_id: topicId },
-      }),
+    const threadId = workflow.thread_id;
+    await runStream(
+      (options) =>
+        resumeWorkflowStream(
+          threadId,
+          { action: "select_topic", data: { topic_id: topicId } },
+          options,
+        ),
+      threadId,
     );
   }
 
@@ -218,11 +278,15 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
     if (!workflow) {
       return;
     }
-    await runRequest(() =>
-      resumeWorkflow(workflow.thread_id, {
-        action: "reject",
-        data: { feedback },
-      }),
+    const threadId = workflow.thread_id;
+    await runStream(
+      (options) =>
+        resumeWorkflowStream(
+          threadId,
+          { action: "reject", data: { feedback } },
+          options,
+        ),
+      threadId,
     );
   }
 
@@ -230,17 +294,23 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
     if (!workflow) {
       return;
     }
-    await runRequest(() =>
-      resumeWorkflow(workflow.thread_id, { action: "approve" }),
+    const threadId = workflow.thread_id;
+    await runStream(
+      (options) =>
+        resumeWorkflowStream(threadId, { action: "approve" }, options),
+      threadId,
     );
   }
 
   async function handleOpenProject(project: ContentProjectSummary) {
-    if (busy || switchingThreadId !== null) {
+    if (switchingThreadId !== null) {
       return;
     }
 
+    abortActiveStream();
     const loadGeneration = ++workflowLoadGeneration.current;
+    setBusy(false);
+    setStreamProgress([]);
     setSwitchingThreadId(project.thread_id);
     setError(null);
     try {
@@ -263,6 +333,7 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
   }
 
   function handleNewTask() {
+    abortActiveStream();
     workflowLoadGeneration.current += 1;
     historyRefreshGeneration.current += 1;
     window.localStorage.removeItem(THREAD_STORAGE_KEY);
@@ -271,6 +342,7 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
     setBusy(false);
     setRestoring(false);
     setSwitchingThreadId(null);
+    setStreamProgress([]);
   }
 
   function renderWorkflow() {
@@ -401,6 +473,8 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
                 </button>
               </div>
             ) : null}
+
+            <WorkflowLiveProgress events={streamProgress} active={busy} />
 
             {restoring ? (
               <div className="restore-state" role="status">

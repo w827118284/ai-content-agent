@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -7,6 +8,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient, Response
 
 from app.api.v1 import workflows as workflow_api
+from app.api.sse import encode_sse
 from app.core.config import settings
 from app.main import app
 from app.repositories.content_project_repository import (
@@ -234,6 +236,16 @@ def select_topic(
     )
     assert response.status_code == 200
     return response.json()
+
+
+def parse_sse(response: Response) -> list[tuple[str, dict]]:
+    events = []
+    for block in response.text.strip().split("\n\n"):
+        lines = block.splitlines()
+        event = next(line[7:] for line in lines if line.startswith("event: "))
+        data = next(line[6:] for line in lines if line.startswith("data: "))
+        events.append((event, json.loads(data)))
+    return events
 
 
 def test_health_and_swagger_are_available(api_context):
@@ -650,3 +662,185 @@ def test_resume_metadata_sync_failure_does_not_change_graph_response(api_context
     selected = select_topic(api_context, started["thread_id"])
     assert selected["status"] == "waiting_article_review"
     assert selected["state"]["article_content"]
+
+
+def test_sse_encoder_uses_json_and_standard_framing():
+    encoded = encode_sse("progress", {"message": "选题完成", "count": 5})
+
+    assert encoded.endswith("\n\n")
+    assert encoded.startswith("event: progress\ndata: ")
+    assert json.loads(encoded.split("data: ", 1)[1]) == {
+        "message": "选题完成",
+        "count": 5,
+    }
+    assert "'message'" not in encoded
+
+
+def test_workflow_stream_requires_auth(api_context):
+    response = request(
+        api_context,
+        "POST",
+        "/api/v1/workflows/start/stream",
+        authenticated=False,
+        json={"topic_direction": "SSE auth"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_start_stream_emits_meta_real_progress_and_interrupt(api_context):
+    response = request(
+        api_context,
+        "POST",
+        "/api/v1/workflows/start/stream",
+        json={"topic_direction": "LangGraph SSE"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.headers["cache-control"] == "no-cache"
+    assert response.headers["x-accel-buffering"] == "no"
+    events = parse_sse(response)
+    assert [event for event, _ in events] == ["meta", "progress", "interrupt"]
+    assert events[0][1]["action"] == "start"
+    assert events[1][1]["node"] == "plan_topics"
+    assert "state" not in events[1][1]
+    assert events[2][1]["interrupt"]["type"] == "topic_selection"
+
+
+def test_resume_stream_handles_topic_reject_and_approve(api_context):
+    started = start_workflow(api_context)
+    thread_id = started["thread_id"]
+
+    selected_response = request(
+        api_context,
+        "POST",
+        f"/api/v1/workflows/{thread_id}/resume/stream",
+        json={"action": "select_topic", "data": {"topic_id": "topic_1"}},
+    )
+    selected_events = parse_sse(selected_response)
+    assert selected_events[-1][0] == "interrupt"
+    assert selected_events[-1][1]["interrupt"]["type"] == "article_review"
+    assert [data["node"] for event, data in selected_events if event == "progress"] == [
+        "human_select_topic",
+        "write_draft",
+    ]
+
+    rejected_response = request(
+        api_context,
+        "POST",
+        f"/api/v1/workflows/{thread_id}/resume/stream",
+        json={
+            "action": "reject",
+            "data": {"feedback": "增加 interrupt 代码示例"},
+        },
+    )
+    rejected_events = parse_sse(rejected_response)
+    assert rejected_events[-1][0] == "interrupt"
+    assert rejected_events[-1][1]["state"]["revision_count"] == 1
+    write_progress = [
+        data
+        for event, data in rejected_events
+        if event == "progress" and data["node"] == "write_draft"
+    ]
+    assert write_progress[0]["message"] == "文章重写完成"
+
+    approved_response = request(
+        api_context,
+        "POST",
+        f"/api/v1/workflows/{thread_id}/resume/stream",
+        json={"action": "approve"},
+    )
+    approved_events = parse_sse(approved_response)
+    assert approved_events[-1][0] == "completed"
+    assert approved_events[-1][1]["status"] == "completed"
+    assert [data["node"] for event, data in approved_events if event == "progress"] == [
+        "human_review",
+        "extract_visuals",
+        "generate_images",
+    ]
+
+
+def test_foreign_resume_stream_returns_404_before_checkpoint_access(
+    api_context,
+    monkeypatch,
+):
+    started = start_workflow(api_context)
+    user_b = api_context.user_repository.add_user("stream_user_b")
+
+    async def forbidden_checkpoint_access(*args, **kwargs):
+        raise AssertionError("checkpoint must not be read for a foreign thread")
+
+    monkeypatch.setattr(
+        workflow_api,
+        "prepare_resume_workflow",
+        forbidden_checkpoint_access,
+    )
+    response = request(
+        api_context,
+        "POST",
+        f"/api/v1/workflows/{started['thread_id']}/resume/stream",
+        token=token_for(user_b.id),
+        json={"action": "select_topic", "data": {"topic_id": "topic_1"}},
+    )
+
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("application/json")
+
+
+def test_stream_runtime_error_is_sanitized_and_compensates_start(
+    api_context,
+    caplog,
+    monkeypatch,
+):
+    sensitive_detail = "provider raw failure api_key=secret-value"
+    caplog.set_level("ERROR", logger=workflow_api.__name__)
+
+    async def failed_updates(*args, **kwargs):
+        raise RuntimeError(sensitive_detail)
+        yield
+
+    monkeypatch.setattr(workflow_api, "stream_start_workflow", failed_updates)
+    response = request(
+        api_context,
+        "POST",
+        "/api/v1/workflows/start/stream",
+        json={"topic_direction": "Runtime failure"},
+    )
+
+    events = parse_sse(response)
+    assert [event for event, _ in events] == ["meta", "error"]
+    assert events[-1][1]["code"] == "workflow_stream_failed"
+    assert sensitive_detail not in response.text
+    assert sensitive_detail not in caplog.text
+    assert "secret-value" not in caplog.text
+    assert "Workflow stream failed" in caplog.text
+    assert "RuntimeError" in caplog.text
+    assert api_context.project_repository.delete_calls == 1
+    assert api_context.project_repository.projects == {}
+
+
+def test_stream_cancellation_propagates_without_error_event_or_compensation(
+    api_context,
+):
+    async def cancelled_updates():
+        raise asyncio.CancelledError
+        yield
+
+    async def consume():
+        stream = workflow_api._stream_events(
+            thread_id="cancelled-thread",
+            action="start",
+            updates=cancelled_updates(),
+            repository=api_context.project_repository,
+            user_id=api_context.user.id,
+            compensate_start=True,
+        )
+        first_event = await anext(stream)
+        with pytest.raises(asyncio.CancelledError):
+            await anext(stream)
+        return first_event
+
+    first_event = asyncio.run(consume())
+    assert first_event.startswith("event: meta")
+    assert api_context.project_repository.delete_calls == 0

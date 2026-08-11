@@ -1,5 +1,4 @@
 import asyncio
-from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -123,7 +122,7 @@ def test_memory_runtime_reuses_one_compiled_graph(monkeypatch):
         get_content_workflow()
 
 
-def test_postgres_runtime_calls_setup_and_closes_context(monkeypatch):
+def test_postgres_runtime_uses_connection_pool_and_calls_setup(monkeypatch):
     clear_checkpointer_environment(monkeypatch)
     database_url = (
         "postgresql://postgres:placeholder@localhost:5432/ai_content_agent"
@@ -134,22 +133,20 @@ def test_postgres_runtime_calls_setup_and_closes_context(monkeypatch):
     saver = MagicMock()
     saver.setup = AsyncMock()
     graph = MagicMock()
-    context_closed = False
-
-    @asynccontextmanager
-    async def saver_context():
-        nonlocal context_closed
-        try:
-            yield saver
-        finally:
-            context_closed = True
+    pool = MagicMock()
+    pool.__aenter__ = AsyncMock(return_value=pool)
+    pool.__aexit__ = AsyncMock(return_value=None)
 
     async def use_runtime():
         with (
             patch(
-                "app.graph.runtime.AsyncPostgresSaver.from_conn_string",
-                return_value=saver_context(),
-            ) as from_conn_string,
+                "app.graph.runtime.AsyncConnectionPool",
+                return_value=pool,
+            ) as pool_factory,
+            patch(
+                "app.graph.runtime.AsyncPostgresSaver",
+                return_value=saver,
+            ) as saver_factory,
             patch(
                 "app.graph.runtime.compile_content_workflow",
                 return_value=graph,
@@ -159,10 +156,15 @@ def test_postgres_runtime_calls_setup_and_closes_context(monkeypatch):
                 assert active_graph is graph
                 assert get_content_workflow() is graph
 
-            from_conn_string.assert_called_once()
-            assert from_conn_string.call_args.args == (database_url,)
+            pool_factory.assert_called_once()
+            assert pool_factory.call_args.args == (database_url,)
+            assert pool_factory.call_args.kwargs["min_size"] == 1
+            assert pool_factory.call_args.kwargs["max_size"] == 10
+            assert pool_factory.call_args.kwargs["open"] is False
+            saver_factory.assert_called_once()
+            assert saver_factory.call_args.args == (pool,)
             assert isinstance(
-                from_conn_string.call_args.kwargs["serde"],
+                saver_factory.call_args.kwargs["serde"],
                 JsonPlusSerializer,
             )
             saver.setup.assert_awaited_once_with()
@@ -170,6 +172,6 @@ def test_postgres_runtime_calls_setup_and_closes_context(monkeypatch):
 
     run(use_runtime())
 
-    assert context_closed is True
+    pool.__aexit__.assert_awaited_once()
     with pytest.raises(WorkflowRuntimeNotInitializedError):
         get_content_workflow()

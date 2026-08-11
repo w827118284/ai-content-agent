@@ -84,3 +84,42 @@ export type WorkflowResumeRequest =
   | {
       action: "approve";
     };
+
+export type WorkflowStreamAction =
+  | "start"
+  | "select_topic"
+  | "reject"
+  | "approve";
+
+export type WorkflowNodeName =
+  | "plan_topics"
+  | "human_select_topic"
+  | "write_draft"
+  | "human_review"
+  | "extract_visuals"
+  | "generate_images";
+
+export interface WorkflowStreamMeta {
+  thread_id: string;
+  action: WorkflowStreamAction;
+}
+
+export interface WorkflowProgressEvent {
+  thread_id: string;
+  node: WorkflowNodeName;
+  status: "completed";
+  message: string;
+}
+
+export interface WorkflowStreamError {
+  thread_id: string;
+  code: "workflow_stream_failed";
+  message: string;
+}
+
+export type WorkflowStreamEvent =
+  | { type: "meta"; data: WorkflowStreamMeta }
+  | { type: "progress"; data: WorkflowProgressEvent }
+  | { type: "interrupt"; data: WorkflowResponse }
+  | { type: "completed"; data: WorkflowResponse }
+  | { type: "error"; data: WorkflowStreamError };

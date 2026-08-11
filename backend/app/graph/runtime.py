@@ -5,6 +5,8 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.graph.state import CompiledStateGraph
+from psycopg.rows import dict_row
+from psycopg_pool import AsyncConnectionPool
 
 from app.core.config import Settings
 from app.graph.workflow import compile_content_workflow
@@ -61,10 +63,18 @@ async def workflow_runtime(
         )
 
     database_url = config.database_url.get_secret_value()
-    async with AsyncPostgresSaver.from_conn_string(
+    async with AsyncConnectionPool(
         database_url,
-        serde=serializer,
-    ) as checkpointer:
+        kwargs={
+            "autocommit": True,
+            "prepare_threshold": 0,
+            "row_factory": dict_row,
+        },
+        min_size=1,
+        max_size=10,
+        open=False,
+    ) as pool:
+        checkpointer = AsyncPostgresSaver(pool, serde=serializer)
         await checkpointer.setup()
         graph = compile_content_workflow(checkpointer)
         _content_workflow = graph
