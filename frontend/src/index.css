@@ -1029,8 +1029,9 @@ textarea::placeholder {
 }
 
 .visual-media {
+  position: relative;
   width: 100%;
-  aspect-ratio: 4 / 5;
+  aspect-ratio: 3 / 4;
   overflow: hidden;
   background: #eef1ef;
   border-bottom: 1px solid var(--line);
@@ -1041,6 +1042,10 @@ textarea::placeholder {
   height: 100%;
   display: block;
   object-fit: cover;
+}
+
+.visual-media img.is-loading {
+  opacity: 0;
 }
 
 .image-fallback {
@@ -1054,6 +1059,11 @@ textarea::placeholder {
   background: #eef1ef;
   font-size: 0.78rem;
   font-weight: 700;
+}
+
+.image-loading {
+  position: absolute;
+  inset: 0;
 }
 
 .visual-copy {
@@ -1314,9 +1324,6 @@ textarea::placeholder {
     flex-wrap: wrap;
   }
 
-  .visual-media {
-    aspect-ratio: 4 / 3;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -1,4 +1,5 @@
 import asyncio
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -10,6 +11,7 @@ from app.graph.runner import (
     start_workflow,
 )
 from app.main import app
+from app.graph import nodes
 
 
 @pytest.fixture(autouse=True)
@@ -116,6 +118,44 @@ def test_approve_after_rejects_completes_graph():
     assert result["status"] == "completed"
     assert result["is_completed"] is True
     assert result["interrupt"] is None
+
+
+def test_image_service_runs_once_on_approve_and_not_on_state_reads(monkeypatch):
+    image_service = MagicMock()
+    image_service.generate_images = AsyncMock(
+        side_effect=lambda points: [
+            f"https://images.example.test/{index}.jpeg"
+            for index, _ in enumerate(points)
+        ]
+    )
+    monkeypatch.setattr(nodes, "image_service", image_service)
+    started, _ = start_and_select()
+
+    completed = run(resume_workflow(started["thread_id"], {"action": "approve"}))
+    first_read = run(get_workflow_state(started["thread_id"]))
+    second_read = run(get_workflow_state(started["thread_id"]))
+
+    points = completed["state"]["visual_points"]
+    image_service.generate_images.assert_awaited_once_with(points)
+    assert completed["state"]["image_urls"] == first_read["state"]["image_urls"]
+    assert first_read["state"]["image_urls"] == second_read["state"]["image_urls"]
+
+
+def test_reject_path_does_not_call_image_service(monkeypatch):
+    image_service = MagicMock()
+    image_service.generate_images = AsyncMock()
+    monkeypatch.setattr(nodes, "image_service", image_service)
+    started, _ = start_and_select()
+
+    result = run(
+        resume_workflow(
+            started["thread_id"],
+            {"action": "reject", "feedback": "增加具体代码"},
+        )
+    )
+
+    assert result["status"] == "waiting_article_review"
+    image_service.generate_images.assert_not_awaited()
 
 
 def test_threads_are_isolated():

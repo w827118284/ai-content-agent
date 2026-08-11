@@ -1,6 +1,6 @@
 # AI Content Operations Agent
 
-基于 FastAPI 和 LangGraph 的 AI 自媒体内容运营工作流。当前已跑通选题、人工选择、文章生成、人工审核、Reject 重写、Approve、视觉知识点提炼和图片生成，并支持 Mock / OpenAI Compatible 文字 LLM 切换。
+基于 FastAPI 和 LangGraph 的 AI 自媒体内容运营工作流。当前已跑通选题、人工选择、文章生成、人工审核、Reject 重写、Approve、视觉知识点提炼和图片生成，并支持文字 LLM 与图片模型的 Mock / Real 切换。
 
 ## 环境
 
@@ -47,6 +47,24 @@ LLM_BASE_URL=
 LLM_MODEL=
 LLM_TEMPERATURE=0.2
 ```
+
+## 图片模式
+
+默认 `USE_MOCK_IMAGE=true`，单元测试不会调用收费接口。使用真实 Seedream 时，在本地 `.env` 中配置：
+
+```dotenv
+USE_MOCK_IMAGE=false
+IMAGE_API_KEY=
+IMAGE_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
+IMAGE_MODEL=doubao-seedream-5-0-260128
+IMAGE_SIZE=2K
+IMAGE_WATERMARK=true
+IMAGE_MAX_CONCURRENCY=3
+```
+
+服务通过 Ark 的 OpenAI-compatible `images/generations` 接口生成图片。为满足小红书竖版构图，当前会把 `IMAGE_SIZE=2K` 解析为 3:4 的 `1728x2304` 请求尺寸，并以受限并发保持视觉知识点与图片 URL 的顺序一致。
+
+`response_format=url` 返回的是远端临时 URL，只适合当前阶段验证，不能视为生产级永久资产。生产化需要在后续阶段下载并转存对象存储，本阶段不实现 TOS/S3。
 
 ## Checkpointer 模式
 
@@ -129,4 +147,4 @@ Windows 下使用 Psycopg async 连接 PostgreSQL 时，显式使用 SelectorEve
 
 ## 当前限制
 
-图片生成仍为 Mock。Memory Checkpointer 仅适用于单进程开发和测试；用户、ownership、持久化工作流与历史列表需要 PostgreSQL 模式。本阶段只提供短期 Access Token，不包含 Refresh Token、RBAC 或 OAuth。
+真实图片 URL 尚未转存永久对象存储。Memory Checkpointer 仅适用于单进程开发和测试；用户、ownership、持久化工作流与历史列表需要 PostgreSQL 模式。本阶段只提供短期 Access Token，不包含 Refresh Token、RBAC 或 OAuth。

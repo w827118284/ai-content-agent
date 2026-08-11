@@ -3,7 +3,7 @@ from typing import Any
 from langgraph.types import interrupt
 
 from app.graph.state import AgentState
-from app.services.image_mock import MockImageService
+from app.services.image_service import get_image_service
 from app.services.llm_service import get_llm_service
 
 
@@ -12,7 +12,7 @@ class WorkflowNodeInputError(ValueError):
 
 
 llm_service = get_llm_service()
-image_service = MockImageService()
+image_service = get_image_service()
 
 
 async def plan_topics(state: AgentState) -> dict[str, Any]:

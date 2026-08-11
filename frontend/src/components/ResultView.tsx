@@ -2,6 +2,7 @@ import {
   CheckCircle2,
   FileCheck2,
   ImageOff,
+  LoaderCircle,
   RotateCcw,
 } from "lucide-react";
 import { useState } from "react";
@@ -24,20 +25,32 @@ interface VisualCardProps {
 
 function VisualCard({ point, imageUrl, index }: VisualCardProps) {
   const [imageFailed, setImageFailed] = useState(false);
+  const [imageLoaded, setImageLoaded] = useState(false);
 
   return (
     <article className="visual-card">
       <div className="visual-media">
         {imageUrl && !imageFailed ? (
-          <img
-            src={imageUrl}
-            alt={`知识卡片 ${index + 1}`}
-            onError={() => setImageFailed(true)}
-          />
+          <>
+            {!imageLoaded ? (
+              <div className="image-fallback image-loading" role="status">
+                <LoaderCircle className="spin" size={28} aria-hidden="true" />
+                <span>图片加载中</span>
+              </div>
+            ) : null}
+            <img
+              className={imageLoaded ? undefined : "is-loading"}
+              src={imageUrl}
+              alt={`知识卡片 ${index + 1}`}
+              loading="lazy"
+              onLoad={() => setImageLoaded(true)}
+              onError={() => setImageFailed(true)}
+            />
+          </>
         ) : (
           <div className="image-fallback">
             <ImageOff size={28} aria-hidden="true" />
-            <span>Mock Image</span>
+            <span>图片暂不可用</span>
           </div>
         )}
       </div>
@@ -92,7 +105,7 @@ export function ResultView({
         <div className="visual-grid">
           {visualPoints.map((point, index) => (
             <VisualCard
-              key={`${index}-${point}`}
+              key={`${index}-${point}-${imageUrls[index] ?? "missing"}`}
               point={point}
               imageUrl={imageUrls[index]}
               index={index}

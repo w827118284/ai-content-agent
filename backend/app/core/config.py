@@ -54,6 +54,29 @@ class Settings(BaseSettings):
         le=2,
         validation_alias="LLM_TEMPERATURE",
     )
+    use_mock_image: bool = Field(default=True, validation_alias="USE_MOCK_IMAGE")
+    image_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias="IMAGE_API_KEY",
+    )
+    image_base_url: str = Field(
+        default="https://ark.cn-beijing.volces.com/api/v3",
+        validation_alias="IMAGE_BASE_URL",
+    )
+    image_model: str = Field(
+        default="doubao-seedream-5-0-260128",
+        validation_alias="IMAGE_MODEL",
+    )
+    image_size: str = Field(default="2K", validation_alias="IMAGE_SIZE")
+    image_watermark: bool = Field(
+        default=True,
+        validation_alias="IMAGE_WATERMARK",
+    )
+    image_max_concurrency: int = Field(
+        default=3,
+        ge=1,
+        validation_alias="IMAGE_MAX_CONCURRENCY",
+    )
 
     @field_validator("cors_origins", mode="before")
     @classmethod
