@@ -15,6 +15,7 @@ RUN groupadd --system app && \
 COPY alembic.ini ./alembic.ini
 COPY alembic ./alembic
 COPY app ./app
+RUN mkdir -p /app/outputs/images && chown app:app /app/outputs/images
 
 EXPOSE 8000
 

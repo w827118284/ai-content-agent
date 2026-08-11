@@ -12,6 +12,7 @@ from app.graph.runner import (
 )
 from app.main import app
 from app.graph import nodes
+from app.services.image_service import ImageServiceError
 
 
 @pytest.fixture(autouse=True)
@@ -139,6 +140,44 @@ def test_image_service_runs_once_on_approve_and_not_on_state_reads(monkeypatch):
     image_service.generate_images.assert_awaited_once_with(points)
     assert completed["state"]["image_urls"] == first_read["state"]["image_urls"]
     assert first_read["state"]["image_urls"] == second_read["state"]["image_urls"]
+
+
+def test_generate_images_node_reuses_existing_urls_without_provider_call(monkeypatch):
+    image_service = MagicMock()
+    image_service.generate_images = AsyncMock()
+    monkeypatch.setattr(nodes, "image_service", image_service)
+    state = {
+        "visual_points": ["A", "B"],
+        "image_urls": ["/media/images/a.png", "/media/images/b.png"],
+    }
+
+    result = run(nodes.generate_images(state))  # type: ignore[arg-type]
+
+    assert result == {"image_urls": state["image_urls"], "status": "completed"}
+    image_service.generate_images.assert_not_awaited()
+
+
+def test_image_failure_persists_terminal_failed_state(monkeypatch):
+    image_service = MagicMock()
+    image_service.generate_images = AsyncMock(
+        side_effect=ImageServiceError(
+            "真实图片 API 调用失败",
+            status_code=504,
+            error_code="timeout",
+        )
+    )
+    monkeypatch.setattr(nodes, "image_service", image_service)
+    started, _ = start_and_select()
+
+    failed = run(resume_workflow(started["thread_id"], {"action": "approve"}))
+    restored = run(get_workflow_state(started["thread_id"]))
+
+    assert failed["status"] == "failed"
+    assert failed["is_completed"] is False
+    assert failed["interrupt"] is None
+    assert restored["state"]["status"] == "failed"
+    assert restored["state"]["image_urls"] == []
+    image_service.generate_images.assert_awaited_once()
 
 
 def test_reject_path_does_not_call_image_service(monkeypatch):

@@ -1,3 +1,4 @@
+import logging
 from collections.abc import AsyncIterator
 from typing import Any, Literal, TypedDict
 from uuid import uuid4
@@ -7,6 +8,9 @@ from langgraph.types import Command
 from app.graph.nodes import WorkflowNodeInputError
 from app.graph.runtime import get_content_workflow
 from app.graph.state import AgentState
+
+
+logger = logging.getLogger(__name__)
 
 
 class WorkflowNotFoundError(LookupError):
@@ -177,16 +181,24 @@ async def stream_workflow(
             data = part.get("data")
             if not isinstance(data, dict):
                 continue
-            for node in data:
-                if node != "__interrupt__":
+            for node, update in data.items():
+                if node != "__interrupt__" and not (
+                    isinstance(update, dict) and update.get("status") == "failed"
+                ):
                     yield {"type": "progress", "node": node}
     except WorkflowNodeInputError as exc:
         raise WorkflowValidationError(str(exc)) from exc
 
     updated_snapshot = await _get_snapshot(thread_id)
+    result = _result_from_snapshot(thread_id, updated_snapshot)
+    if result["is_completed"]:
+        logger.info(
+            "Workflow checkpoint transitioned to completed thread_id=%s",
+            thread_id,
+        )
     yield {
         "type": "result",
-        "result": _result_from_snapshot(thread_id, updated_snapshot),
+        "result": result,
     }
 
 

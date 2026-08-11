@@ -18,6 +18,7 @@ const statusLabels: Record<ContentProjectSummary["status"], string> = {
   rewriting: "正在重写",
   extracting_visuals: "正在提炼视觉点",
   generating_images: "正在生成图片",
+  failed: "生成失败",
   completed: "已完成",
 };
 

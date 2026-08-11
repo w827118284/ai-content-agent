@@ -116,6 +116,16 @@ def _terminal_event(result: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         return "completed", response
     if result["interrupt"] is not None:
         return "interrupt", response
+    if response["status"] == "failed":
+        return (
+            "error",
+            {
+                "thread_id": response["thread_id"],
+                "code": "workflow_stream_failed",
+                "message": "图片生成失败，请稍后新建任务重试",
+                "workflow": response,
+            },
+        )
     raise RuntimeError("workflow stream ended without interrupt or completion")
 
 

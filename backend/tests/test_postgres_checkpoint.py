@@ -11,6 +11,7 @@ from app.core.config import settings
 from app.graph import nodes
 from app.graph.state import AgentState
 from app.graph.workflow import compile_content_workflow
+from app.services.image_mock import MockImageService
 from app.services.llm_mock import MockLLMService
 
 
@@ -53,6 +54,7 @@ async def postgres_graph(database_url: str):
 )
 def test_workflow_recovers_across_new_postgres_graph_instances(monkeypatch):
     monkeypatch.setattr(nodes, "llm_service", MockLLMService())
+    monkeypatch.setattr(nodes, "image_service", MockImageService())
     thread_id = f"postgres-integration-{uuid4()}"
     config = {"configurable": {"thread_id": thread_id}}
 

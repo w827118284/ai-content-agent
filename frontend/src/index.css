@@ -783,6 +783,15 @@ textarea::placeholder {
   border-color: #8ab8aa;
 }
 
+.progress-step.is-failed {
+  color: #a33a32;
+}
+
+.progress-step.is-failed .progress-marker {
+  border-color: #a33a32;
+  color: #a33a32;
+}
+
 .workflow-surface {
   min-width: 0;
   padding: 32px 38px 44px;

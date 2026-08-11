@@ -1,5 +1,5 @@
 import json
-from typing import Any, TypeVar
+from typing import TypeVar
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -68,15 +68,15 @@ ResponseModel = TypeVar("ResponseModel", bound=BaseModel)
 
 
 def _message_text(message: BaseMessage) -> str:
-    content = message.content
-    if isinstance(content, str):
-        text = content.strip()
-    else:
+    text = message.text.strip()
+    if not text and isinstance(message.content, list):
         text_parts: list[str] = []
-        for block in content:
-            if isinstance(block, str):
-                text_parts.append(block)
-            elif isinstance(block, dict) and isinstance(block.get("text"), str):
+        for block in message.content:
+            if (
+                isinstance(block, dict)
+                and block.get("type") in {"text", "output_text"}
+                and isinstance(block.get("text"), str)
+            ):
                 text_parts.append(block["text"])
         text = "\n".join(text_parts).strip()
 
@@ -107,7 +107,6 @@ class LLMService:
         api_key: str | None,
         base_url: str | None,
         model: str | None,
-        temperature: float,
     ) -> None:
         normalized_api_key = api_key.strip() if api_key else ""
         normalized_model = model.strip() if model else ""
@@ -115,12 +114,10 @@ class LLMService:
             raise LLMConfigurationError("真实 LLM 模式缺少 LLM_API_KEY")
         if not normalized_model:
             raise LLMConfigurationError("真实 LLM 模式缺少 LLM_MODEL")
-
-        client_options: dict[str, Any] = {
+        client_options = {
             "model": normalized_model,
             "api_key": normalized_api_key,
-            "temperature": temperature,
-            "max_retries": 2,
+            "max_retries": 0,
         }
         if base_url and base_url.strip():
             client_options["base_url"] = base_url.strip()
@@ -134,9 +131,11 @@ class LLMService:
         ]
         try:
             response = await self._client.ainvoke(messages)
-        except Exception as exc:
-            raise LLMServiceError("真实 LLM API 调用失败") from exc
-        return _message_text(response)
+        except Exception:
+            sanitized_error = LLMServiceError("真实 LLM API 调用失败")
+        else:
+            return _message_text(response)
+        raise sanitized_error from None
 
     async def plan_topics(self, topic_direction: str) -> list[TopicOption]:
         user_prompt = (
@@ -210,8 +209,11 @@ def get_llm_service() -> MockLLMService | LLMService:
     if settings.use_mock_llm:
         return MockLLMService()
     return LLMService(
-        api_key=settings.llm_api_key,
+        api_key=(
+            settings.llm_api_key.get_secret_value()
+            if settings.llm_api_key is not None
+            else None
+        ),
         base_url=settings.llm_base_url,
         model=settings.llm_model,
-        temperature=settings.llm_temperature,
     )

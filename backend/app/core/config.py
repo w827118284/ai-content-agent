@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import Field, SecretStr, field_validator
@@ -45,14 +46,17 @@ class Settings(BaseSettings):
         validation_alias="JWT_ACCESS_TOKEN_EXPIRE_MINUTES",
     )
     use_mock_llm: bool = Field(default=True, validation_alias="USE_MOCK_LLM")
-    llm_api_key: str | None = Field(default=None, validation_alias="LLM_API_KEY")
-    llm_base_url: str | None = Field(default=None, validation_alias="LLM_BASE_URL")
-    llm_model: str | None = Field(default=None, validation_alias="LLM_MODEL")
-    llm_temperature: float = Field(
-        default=0.2,
-        ge=0,
-        le=2,
-        validation_alias="LLM_TEMPERATURE",
+    llm_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias="LLM_API_KEY",
+    )
+    llm_base_url: str = Field(
+        default="https://api.deepseek.com",
+        validation_alias="LLM_BASE_URL",
+    )
+    llm_model: str = Field(
+        default="deepseek-v4-pro",
+        validation_alias="LLM_MODEL",
     )
     use_mock_image: bool = Field(default=True, validation_alias="USE_MOCK_IMAGE")
     image_api_key: SecretStr | None = Field(
@@ -60,17 +64,36 @@ class Settings(BaseSettings):
         validation_alias="IMAGE_API_KEY",
     )
     image_base_url: str = Field(
-        default="https://ark.cn-beijing.volces.com/api/v3",
+        default="https://api.iotwq.top/v1",
         validation_alias="IMAGE_BASE_URL",
     )
     image_model: str = Field(
-        default="doubao-seedream-5-0-260128",
+        default="gpt-image-2",
         validation_alias="IMAGE_MODEL",
     )
-    image_size: str = Field(default="2K", validation_alias="IMAGE_SIZE")
-    image_watermark: bool = Field(
-        default=True,
-        validation_alias="IMAGE_WATERMARK",
+    image_size: str = Field(default="1280x1280", validation_alias="IMAGE_SIZE")
+    image_quality: str = Field(default="auto", validation_alias="IMAGE_QUALITY")
+    image_output_format: Literal["png", "jpeg", "webp"] = Field(
+        default="png",
+        validation_alias="IMAGE_OUTPUT_FORMAT",
+    )
+    image_moderation: str = Field(
+        default="auto",
+        validation_alias="IMAGE_MODERATION",
+    )
+    image_n: int = Field(default=1, ge=1, le=1, validation_alias="IMAGE_N")
+    image_output_dir: str = Field(
+        default="outputs/images",
+        validation_alias="IMAGE_OUTPUT_DIR",
+    )
+    image_public_prefix: str = Field(
+        default="/media/images",
+        validation_alias="IMAGE_PUBLIC_PREFIX",
+    )
+    image_timeout_seconds: float = Field(
+        default=300,
+        ge=1,
+        validation_alias="IMAGE_TIMEOUT_SECONDS",
     )
     image_max_concurrency: int = Field(
         default=3,
@@ -91,6 +114,13 @@ class Settings(BaseSettings):
         if len(value.get_secret_value().encode("utf-8")) < 32:
             raise ValueError("JWT_SECRET_KEY must be at least 32 bytes when UTF-8 encoded")
         return value
+
+    @property
+    def resolved_image_output_dir(self) -> Path:
+        output_dir = Path(self.image_output_dir)
+        if output_dir.is_absolute():
+            return output_dir
+        return Path(__file__).resolve().parents[2] / output_dir
 
 
 settings = Settings()

@@ -17,6 +17,7 @@ WorkflowStatus: TypeAlias = Literal[
     "rewriting",
     "extracting_visuals",
     "generating_images",
+    "failed",
     "completed",
 ]
 

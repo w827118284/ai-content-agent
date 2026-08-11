@@ -1,9 +1,11 @@
 import asyncio
 import json
+import traceback
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from pydantic import SecretStr
 
 from app.core.config import Settings, settings
 from app.services.llm_mock import MockLLMService
@@ -27,7 +29,6 @@ def build_service(*responses: AIMessage):
             api_key="unit-test-placeholder",
             base_url="https://unit.invalid/v1",
             model="unit-test-model",
-            temperature=0.2,
         )
     return service, client
 
@@ -37,15 +38,13 @@ def test_settings_read_unprefixed_llm_environment_variables(monkeypatch):
     monkeypatch.setenv("LLM_API_KEY", "unit-test-placeholder")
     monkeypatch.setenv("LLM_BASE_URL", "https://unit.invalid/v1")
     monkeypatch.setenv("LLM_MODEL", "unit-test-model")
-    monkeypatch.setenv("LLM_TEMPERATURE", "0.35")
 
     configured = Settings(_env_file=None)
 
     assert configured.use_mock_llm is False
-    assert configured.llm_api_key == "unit-test-placeholder"
+    assert configured.llm_api_key == SecretStr("unit-test-placeholder")
     assert configured.llm_base_url == "https://unit.invalid/v1"
     assert configured.llm_model == "unit-test-model"
-    assert configured.llm_temperature == 0.35
 
 
 def test_service_selector_keeps_mock_default_and_builds_real_mode(monkeypatch):
@@ -53,10 +52,9 @@ def test_service_selector_keeps_mock_default_and_builds_real_mode(monkeypatch):
     assert isinstance(get_llm_service(), MockLLMService)
 
     monkeypatch.setattr(settings, "use_mock_llm", False)
-    monkeypatch.setattr(settings, "llm_api_key", "unit-test-placeholder")
+    monkeypatch.setattr(settings, "llm_api_key", SecretStr("unit-test-placeholder"))
     monkeypatch.setattr(settings, "llm_base_url", "https://unit.invalid/v1")
     monkeypatch.setattr(settings, "llm_model", "unit-test-model")
-    monkeypatch.setattr(settings, "llm_temperature", 0.4)
     with patch("app.services.llm_service.ChatOpenAI") as chat_openai:
         service = get_llm_service()
 
@@ -64,10 +62,43 @@ def test_service_selector_keeps_mock_default_and_builds_real_mode(monkeypatch):
     chat_openai.assert_called_once_with(
         model="unit-test-model",
         api_key="unit-test-placeholder",
-        temperature=0.4,
-        max_retries=2,
+        max_retries=0,
         base_url="https://unit.invalid/v1",
     )
+
+
+def test_real_service_uses_deepseek_chat_completions_options_only():
+    with patch("app.services.llm_service.ChatOpenAI") as chat_openai:
+        LLMService(
+            api_key="unit-test-placeholder",
+            base_url="https://api.deepseek.com",
+            model="deepseek-v4-pro",
+        )
+
+    chat_openai.assert_called_once_with(
+        model="deepseek-v4-pro",
+        api_key="unit-test-placeholder",
+        max_retries=0,
+        base_url="https://api.deepseek.com",
+    )
+
+
+def test_responses_style_message_extracts_only_final_text():
+    response = AIMessage(
+        content=[
+            {"type": "reasoning", "reasoning": "internal reasoning"},
+            {"type": "text", "text": "最终业务文本"},
+        ]
+    )
+    service, _ = build_service(response)
+
+    assert run(service.write_article(
+        topic_direction="AI Agent",
+        selected_topic="Responses API",
+        previous_article=None,
+        feedback=None,
+        revision_count=0,
+    )) == "最终业务文本"
 
 
 def test_plan_topics_parses_exactly_five_titles():
@@ -168,23 +199,31 @@ def test_real_llm_api_failure_raises_a_clear_service_error():
             api_key="unit-test-placeholder",
             base_url="https://unit.invalid/v1",
             model="unit-test-model",
-            temperature=0.2,
         )
 
-    with pytest.raises(LLMServiceError, match="真实 LLM API 调用失败"):
+    with pytest.raises(LLMServiceError, match="真实 LLM API 调用失败") as exc_info:
         run(service.plan_topics("LangGraph"))
 
+    formatted = "".join(
+        traceback.format_exception(
+            type(exc_info.value),
+            exc_info.value,
+            exc_info.value.__traceback__,
+        )
+    )
+    assert "provider unavailable" not in formatted
 
-@pytest.mark.skipif(
-    not all([settings.llm_api_key, settings.llm_base_url, settings.llm_model]),
-    reason="缺少 LLM_API_KEY、LLM_BASE_URL 或 LLM_MODEL",
-)
+
+@pytest.mark.skip(reason="真实文字 Provider 仅通过显式 smoke test 调用")
 def test_real_llm_plan_topics_integration():
     service = LLMService(
-        api_key=settings.llm_api_key,
+        api_key=(
+            settings.llm_api_key.get_secret_value()
+            if settings.llm_api_key is not None
+            else None
+        ),
         base_url=settings.llm_base_url,
         model=settings.llm_model,
-        temperature=settings.llm_temperature,
     )
 
     topics = run(service.plan_topics("LangGraph Human-in-the-loop 实战"))

@@ -14,16 +14,21 @@ x-backend-common: &backend-common
     CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
     USE_MOCK_LLM: ${USE_MOCK_LLM:-true}
     LLM_API_KEY: ${LLM_API_KEY:-}
-    LLM_BASE_URL: ${LLM_BASE_URL:-}
-    LLM_MODEL: ${LLM_MODEL:-}
-    LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.2}
+    LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
+    LLM_MODEL: ${LLM_MODEL:-deepseek-v4-pro}
     USE_MOCK_IMAGE: ${USE_MOCK_IMAGE:-true}
     IMAGE_API_KEY: ${IMAGE_API_KEY:-}
-    IMAGE_BASE_URL: ${IMAGE_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}
-    IMAGE_MODEL: ${IMAGE_MODEL:-doubao-seedream-5-0-260128}
-    IMAGE_SIZE: ${IMAGE_SIZE:-2K}
-    IMAGE_WATERMARK: ${IMAGE_WATERMARK:-true}
+    IMAGE_BASE_URL: ${IMAGE_BASE_URL:-https://api.iotwq.top/v1}
+    IMAGE_MODEL: ${IMAGE_MODEL:-gpt-image-2}
+    IMAGE_SIZE: ${IMAGE_SIZE:-1280x1280}
+    IMAGE_QUALITY: ${IMAGE_QUALITY:-auto}
+    IMAGE_OUTPUT_FORMAT: ${IMAGE_OUTPUT_FORMAT:-png}
+    IMAGE_MODERATION: ${IMAGE_MODERATION:-auto}
+    IMAGE_N: ${IMAGE_N:-1}
     IMAGE_MAX_CONCURRENCY: ${IMAGE_MAX_CONCURRENCY:-3}
+    IMAGE_OUTPUT_DIR: ${IMAGE_OUTPUT_DIR:-/app/outputs/images}
+    IMAGE_PUBLIC_PREFIX: ${IMAGE_PUBLIC_PREFIX:-/media/images}
+    IMAGE_TIMEOUT_SECONDS: ${IMAGE_TIMEOUT_SECONDS:-300}
 
 services:
   db:
@@ -56,6 +61,8 @@ services:
     restart: unless-stopped
     expose:
       - "8000"
+    volumes:
+      - generated_images:/app/outputs/images
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -91,3 +98,4 @@ services:
 
 volumes:
   postgres_data:
+  generated_images:

@@ -49,6 +49,7 @@ const statusLabels: Record<WorkflowStatus, string> = {
   rewriting: "正在重写文章",
   extracting_visuals: "正在提炼视觉点",
   generating_images: "正在生成图片",
+  failed: "图片生成失败",
   completed: "已完成",
 };
 
@@ -229,6 +230,10 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
             void refreshHistory();
           } else if (event.type === "error") {
             terminalReceived = true;
+            if (event.data.workflow) {
+              applyWorkflow(event.data.workflow);
+              void refreshHistory();
+            }
             setError(event.data.message);
           }
         },
@@ -395,6 +400,18 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
           imageUrls={workflow.state.image_urls}
           onNewTask={handleNewTask}
         />
+      );
+    }
+
+    if (workflow.status === "failed") {
+      return (
+        <div className="processing-state" role="alert">
+          <X size={26} aria-hidden="true" />
+          <h2>图片生成失败，请稍后新建任务重试</h2>
+          <button className="secondary-button" type="button" onClick={handleNewTask}>
+            新建任务
+          </button>
+        </div>
       );
     }
 

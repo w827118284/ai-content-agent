@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.api.v1.auth import router as auth_router
 from app.api.v1.projects import router as projects_router
@@ -31,6 +32,11 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["GET", "POST"],
     allow_headers=["Authorization", "Content-Type"],
+)
+app.mount(
+    settings.image_public_prefix,
+    StaticFiles(directory=settings.resolved_image_output_dir, check_dir=False),
+    name="generated-images",
 )
 app.include_router(auth_router, prefix=settings.api_v1_prefix)
 app.include_router(workflows_router, prefix=settings.api_v1_prefix)

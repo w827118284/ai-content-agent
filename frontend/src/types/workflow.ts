@@ -6,6 +6,7 @@ export type WorkflowStatus =
   | "rewriting"
   | "extracting_visuals"
   | "generating_images"
+  | "failed"
   | "completed";
 
 export type ReviewStatus = "pending" | "rejected" | "approved" | null;
@@ -115,6 +116,7 @@ export interface WorkflowStreamError {
   thread_id: string;
   code: "workflow_stream_failed";
   message: string;
+  workflow?: WorkflowResponse;
 }
 
 export type WorkflowStreamEvent =

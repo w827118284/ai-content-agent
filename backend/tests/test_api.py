@@ -2,6 +2,7 @@ import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -10,6 +11,7 @@ from httpx import ASGITransport, AsyncClient, Response
 from app.api.v1 import workflows as workflow_api
 from app.api.sse import encode_sse
 from app.core.config import settings
+from app.graph import nodes
 from app.main import app
 from app.repositories.content_project_repository import (
     get_content_project_repository,
@@ -23,6 +25,7 @@ from app.services.auth_service import (
     hash_password,
     verify_password,
 )
+from app.services.image_service import ImageServiceError
 
 
 TEST_SECRET = "unit-test-jwt-secret-at-least-32-bytes"
@@ -759,6 +762,69 @@ def test_resume_stream_handles_topic_reject_and_approve(api_context):
         "extract_visuals",
         "generate_images",
     ]
+
+
+def test_image_failure_emits_terminal_error_and_state_is_failed(
+    api_context,
+    monkeypatch,
+):
+    image_service = SimpleNamespace(
+        generate_images=AsyncMock(side_effect=ImageServiceError("sanitized failure"))
+    )
+    monkeypatch.setattr(nodes, "image_service", image_service)
+    started = start_workflow(api_context)
+    select_topic(api_context, started["thread_id"])
+
+    response = request(
+        api_context,
+        "POST",
+        f"/api/v1/workflows/{started['thread_id']}/resume/stream",
+        json={"action": "approve"},
+    )
+    events = parse_sse(response)
+    restored = request(
+        api_context,
+        "GET",
+        f"/api/v1/workflows/{started['thread_id']}/state",
+    ).json()
+
+    assert events[-1][0] == "error"
+    assert events[-1][1]["code"] == "workflow_stream_failed"
+    assert events[-1][1]["message"] == "图片生成失败，请稍后新建任务重试"
+    assert events[-1][1]["workflow"] == restored
+    assert events[-1][1]["workflow"]["status"] == "failed"
+    assert "sanitized failure" not in response.text
+    assert all(
+        data.get("node") != "generate_images"
+        for event, data in events
+        if event == "progress"
+    )
+    assert restored["status"] == "failed"
+    assert restored["state"]["image_urls"] == []
+    assert api_context.project_repository.projects[
+        started["thread_id"]
+    ].status == "failed"
+
+
+def test_generated_media_is_browser_accessible(api_context, monkeypatch, tmp_path):
+    media_route = next(
+        route
+        for route in app.routes
+        if getattr(route, "path", None) == settings.image_public_prefix
+    )
+    monkeypatch.setattr(media_route.app, "directory", str(tmp_path))
+    monkeypatch.setattr(media_route.app, "all_directories", [str(tmp_path)])
+    (tmp_path / "test-image.png").write_bytes(b"test-image-content")
+
+    response = request(
+        api_context,
+        "GET",
+        "/media/images/test-image.png",
+        authenticated=False,
+    )
+
+    assert response.status_code == 200
+    assert response.content == b"test-image-content"
 
 
 def test_foreign_resume_stream_returns_404_before_checkpoint_access(

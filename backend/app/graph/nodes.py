@@ -1,9 +1,10 @@
+import logging
 from typing import Any
 
 from langgraph.types import interrupt
 
 from app.graph.state import AgentState
-from app.services.image_service import get_image_service
+from app.services.image_service import ImageServiceError, get_image_service
 from app.services.llm_service import get_llm_service
 
 
@@ -11,6 +12,7 @@ class WorkflowNodeInputError(ValueError):
     """Raised when a human resume payload is invalid for the paused node."""
 
 
+logger = logging.getLogger(__name__)
 llm_service = get_llm_service()
 image_service = get_image_service()
 
@@ -122,7 +124,33 @@ async def extract_visuals(state: AgentState) -> dict[str, Any]:
 
 
 async def generate_images(state: AgentState) -> dict[str, Any]:
-    image_urls = await image_service.generate_images(state["visual_points"])
+    existing_urls = state["image_urls"]
+    if (
+        existing_urls
+        and len(existing_urls) == len(state["visual_points"])
+        and all(url.strip() for url in existing_urls)
+    ):
+        logger.info("Image generation node reused persisted image URLs")
+        return {
+            "image_urls": existing_urls,
+            "status": "completed",
+        }
+
+    logger.info(
+        "Image generation node started image_count=%s",
+        len(state["visual_points"]),
+    )
+    try:
+        image_urls = await image_service.generate_images(state["visual_points"])
+    except ImageServiceError as exc:
+        logger.error(
+            "Image generation node failed error_type=%s status_code=%s error_code=%s",
+            type(exc).__name__,
+            exc.status_code,
+            exc.error_code,
+        )
+        return {"status": "failed"}
+    logger.info("Image generation node completed image_count=%s", len(image_urls))
     return {
         "image_urls": image_urls,
         "status": "completed",

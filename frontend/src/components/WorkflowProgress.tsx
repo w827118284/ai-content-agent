@@ -1,4 +1,4 @@
-import { Check, Circle, LoaderCircle } from "lucide-react";
+import { Check, Circle, LoaderCircle, X } from "lucide-react";
 
 import type { WorkflowStatus } from "../types/workflow";
 
@@ -20,6 +20,7 @@ const activeStepByStatus: Record<WorkflowStatus, number> = {
   rewriting: 2,
   extracting_visuals: 4,
   generating_images: 5,
+  failed: 5,
   completed: 6,
 };
 
@@ -37,18 +38,21 @@ export function WorkflowProgress({ status }: WorkflowProgressProps) {
         {steps.map((step, index) => {
           const completed = status === "completed" || index < activeStep;
           const active = !completed && index === activeStep;
+          const failed = status === "failed" && index === activeStep;
 
           return (
             <li
               className={`progress-step${completed ? " is-complete" : ""}${
                 active ? " is-active" : ""
-              }`}
+              }${failed ? " is-failed" : ""}`}
               key={step}
               aria-current={active ? "step" : undefined}
             >
               <span className="progress-marker" aria-hidden="true">
                 {completed ? (
                   <Check size={15} />
+                ) : failed ? (
+                  <X size={15} />
                 ) : active ? (
                   <LoaderCircle className="spin" size={15} />
                 ) : (

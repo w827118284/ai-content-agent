@@ -144,6 +144,22 @@ function completedResponse(responseThreadId = threadId): WorkflowResponse {
   };
 }
 
+function failedImageResponse(responseThreadId = threadId): WorkflowResponse {
+  return {
+    thread_id: responseThreadId,
+    status: "failed",
+    is_completed: false,
+    interrupt: null,
+    state: state({
+      selected_topic: topics[0].title,
+      article_content: "# 已审核文章",
+      review_status: "approved",
+      status: "failed",
+      visual_points: ["LangGraph 图片节点"],
+    }),
+  };
+}
+
 function projectSummary(
   overrides: Partial<ContentProjectSummary> = {},
 ): ContentProjectSummary {
@@ -449,6 +465,44 @@ describe("AI content workflow", () => {
     expect(screen.getAllByText(/知识点 \d{2}/)).toHaveLength(3);
   });
 
+  it("applies a failed workflow carried by the approve error event", async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem(THREAD_STORAGE_KEY, threadId);
+    mockedGetWorkflowState.mockResolvedValue(articleReviewResponse());
+    mockedResumeWorkflowStream.mockImplementation(
+      async (responseThreadId, body, options) => {
+        expect(responseThreadId).toBe(threadId);
+        expect(body).toEqual({ action: "approve" });
+        options.onEvent({
+          type: "meta",
+          data: { thread_id: threadId, action: "approve" },
+        });
+        options.onEvent({
+          type: "error",
+          data: {
+            thread_id: threadId,
+            code: "workflow_stream_failed",
+            message: "图片生成失败，请稍后新建任务重试",
+            workflow: failedImageResponse(),
+          },
+        });
+      },
+    );
+
+    render(<App />);
+    await screen.findByText("初稿标题");
+    await user.click(screen.getByRole("button", { name: "通过" }));
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "图片生成失败，请稍后新建任务重试",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "新建任务" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "通过" })).not.toBeInTheDocument();
+    expect(window.localStorage.getItem(THREAD_STORAGE_KEY)).toBe(threadId);
+  });
+
   it("restores a waiting article review from localStorage", async () => {
     window.localStorage.setItem(THREAD_STORAGE_KEY, threadId);
     mockedGetWorkflowState.mockResolvedValue(articleReviewResponse());
@@ -458,6 +512,21 @@ describe("AI content workflow", () => {
     expect(await screen.findByText("初稿标题")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "要求修改" })).toBeEnabled();
     expect(mockedGetWorkflowState).toHaveBeenCalledWith(threadId);
+  });
+
+  it("restores an image failure without leaving a loading spinner", async () => {
+    window.localStorage.setItem(THREAD_STORAGE_KEY, threadId);
+    mockedGetWorkflowState.mockResolvedValue(failedImageResponse());
+
+    render(<App />);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "图片生成失败，请稍后新建任务重试",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "新建任务" })).toBeEnabled();
+    expect(screen.queryByText("正在生成图片")).not.toBeInTheDocument();
   });
 
   it("clears an obsolete thread after a 404 and returns to start", async () => {

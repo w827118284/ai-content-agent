@@ -43,28 +43,33 @@ JWT 只包含 `sub`、`iat`、`exp`。`sub` 是用户 UUID；密码、数据库�
 ```dotenv
 USE_MOCK_LLM=false
 LLM_API_KEY=
-LLM_BASE_URL=
-LLM_MODEL=
-LLM_TEMPERATURE=0.2
+LLM_BASE_URL=https://api.deepseek.com
+LLM_MODEL=deepseek-v4-pro
 ```
+
+真实文字模型通过 DeepSeek 的 OpenAI-compatible Chat Completions API 调用，SDK 自动重试关闭。项目只从本地环境变量读取 `LLM_API_KEY`，不会读取 Codex CLI 配置或 `~/.codex/auth.json`；工作流状态仍由 LangGraph Checkpointer 管理。
 
 ## 图片模式
 
-默认 `USE_MOCK_IMAGE=true`，单元测试不会调用收费接口。使用真实 Seedream 时，在本地 `.env` 中配置：
+默认 `USE_MOCK_IMAGE=true`，单元测试不会调用收费接口。使用 OpenAI-compatible Image API 时，在本地 `.env` 中配置：
 
 ```dotenv
 USE_MOCK_IMAGE=false
 IMAGE_API_KEY=
-IMAGE_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
-IMAGE_MODEL=doubao-seedream-5-0-260128
-IMAGE_SIZE=2K
-IMAGE_WATERMARK=true
+IMAGE_BASE_URL=https://api.iotwq.top/v1
+IMAGE_MODEL=gpt-image-2
+IMAGE_SIZE=1280x1280
+IMAGE_QUALITY=auto
+IMAGE_OUTPUT_FORMAT=png
+IMAGE_MODERATION=auto
+IMAGE_N=1
 IMAGE_MAX_CONCURRENCY=3
+IMAGE_OUTPUT_DIR=outputs/images
+IMAGE_PUBLIC_PREFIX=/media/images
+IMAGE_TIMEOUT_SECONDS=300
 ```
 
-服务通过 Ark 的 OpenAI-compatible `images/generations` 接口生成图片。为满足小红书竖版构图，当前会把 `IMAGE_SIZE=2K` 解析为 3:4 的 `1728x2304` 请求尺寸，并以受限并发保持视觉知识点与图片 URL 的顺序一致。
-
-`response_format=url` 返回的是远端临时 URL，只适合当前阶段验证，不能视为生产级永久资产。生产化需要在后续阶段下载并转存对象存储，本阶段不实现 TOS/S3。
+服务通过 OpenAI-compatible `images/generations` 接口生成图片，同时支持 `b64_json` 和临时 `url` 响应。图片会立即保存到 `IMAGE_OUTPUT_DIR`，State 中只记录 `/media/images/<filename>` 形式的相对公开 URL。真实生图请求关闭 SDK 自动重试，避免收费 POST 被盲目重复执行。
 
 ## Checkpointer 模式
 
