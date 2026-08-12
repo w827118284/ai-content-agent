@@ -12,6 +12,14 @@ from openai import AsyncOpenAI
 
 from app.core.config import settings
 from app.services.image_mock import MockImageService
+from app.services.provider_guard import (
+    CircuitBreaker,
+    ProviderCircuitOpenError,
+    ProviderFailureCategory,
+    SlidingWindowRateLimiter,
+    classify_provider_failure,
+    is_breaker_failure,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -32,10 +40,12 @@ class ImageServiceError(RuntimeError):
         *,
         status_code: int | None = None,
         error_code: str | None = None,
+        category: ProviderFailureCategory | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.error_code = error_code
+        self.category = category
 
 
 class ImageConfigurationError(ImageServiceError):
@@ -79,7 +89,10 @@ def _response_data(response: Any) -> list[Any]:
         else getattr(response, "data", None)
     )
     if not isinstance(data, list) or not data:
-        raise ImageResponseError("真实图片 API 返回结果中没有图片数据")
+        raise ImageResponseError(
+            "真实图片 API 返回结果中没有图片数据",
+            category="provider_error",
+        )
     return data
 
 
@@ -105,6 +118,11 @@ class OpenAIImageService:
         timeout_seconds: float,
         client: Any | None = None,
         download_client: Any | None = None,
+        requests_per_minute: int = 10,
+        breaker_failure_threshold: int = 3,
+        breaker_cooldown_seconds: float = 30,
+        rate_limiter: SlidingWindowRateLimiter | None = None,
+        circuit_breaker: CircuitBreaker | None = None,
     ) -> None:
         normalized_api_key = api_key.strip() if api_key else ""
         normalized_base_url = base_url.strip().rstrip("/") if base_url else ""
@@ -123,6 +141,8 @@ class OpenAIImageService:
             raise ImageConfigurationError("IMAGE_N 必须为 1")
         if max_concurrency < 1:
             raise ImageConfigurationError("IMAGE_MAX_CONCURRENCY 必须大于 0")
+        if requests_per_minute < 1:
+            raise ImageConfigurationError("IMAGE_REQUESTS_PER_MINUTE 必须大于 0")
 
         self.model = normalized_model
         self.size = normalized_size
@@ -141,11 +161,22 @@ class OpenAIImageService:
             timeout=self.timeout,
         )
         self._download_client = download_client
+        self._provider_semaphore = asyncio.Semaphore(max_concurrency)
+        self._rate_limiter = rate_limiter or SlidingWindowRateLimiter(
+            requests_per_minute
+        )
+        self._circuit_breaker = circuit_breaker or CircuitBreaker(
+            breaker_failure_threshold,
+            breaker_cooldown_seconds,
+        )
 
     async def _download_image(self, url: str) -> bytes:
         parsed = urlparse(url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise ImageResponseError("真实图片 API 返回了无效图片 URL")
+            raise ImageResponseError(
+                "真实图片 API 返回了无效图片 URL",
+                category="provider_error",
+            )
         try:
             if self._download_client is not None:
                 response = await self._download_client.get(url)
@@ -157,10 +188,18 @@ class OpenAIImageService:
                     response = await client.get(url)
             response.raise_for_status()
             content = bytes(response.content)
-        except Exception:
-            raise ImageResponseError("真实图片 URL 下载失败") from None
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise ImageResponseError(
+                "真实图片 URL 下载失败",
+                category=classify_provider_failure(exc),
+            ) from None
         if not content:
-            raise ImageResponseError("真实图片 URL 返回了空内容")
+            raise ImageResponseError(
+                "真实图片 URL 返回了空内容",
+                category="provider_error",
+            )
         return content
 
     async def _extract_image_bytes(self, response: Any) -> bytes:
@@ -180,10 +219,16 @@ class OpenAIImageService:
             try:
                 return base64.b64decode(encoded, validate=True)
             except (ValueError, binascii.Error):
-                raise ImageResponseError("真实图片 API 返回了无效 base64 图片数据") from None
+                raise ImageResponseError(
+                    "真实图片 API 返回了无效 base64 图片数据",
+                    category="provider_error",
+                ) from None
         if has_url:
             return await self._download_image(url.strip())
-        raise ImageResponseError("真实图片 API 返回结果中没有 b64_json 或 URL")
+        raise ImageResponseError(
+            "真实图片 API 返回结果中没有 b64_json 或 URL",
+            category="provider_error",
+        )
 
     def _persist_sync(self, content: bytes) -> str:
         if not content:
@@ -237,37 +282,129 @@ class OpenAIImageService:
 
     async def generate_image(self, visual_point: str) -> str:
         prompt = build_image_prompt(visual_point)
-        logger.info(
-            "Image API request started model=%s size=%s",
-            self.model,
-            self.size,
-        )
         try:
-            response = await self._client.images.generate(
-                model=self.model,
-                prompt=prompt,
-                size=self.size,
-                quality=self.quality,
-                output_format=self.output_format,
-                moderation=self.moderation,
-                n=self.n,
+            admission_generation = (
+                await self._circuit_breaker.check_available()
             )
-        except Exception as exc:
-            status_code, error_code = _provider_error_metadata(exc)
+        except ProviderCircuitOpenError:
+            logger.warning(
+                "provider_circuit_open provider=image operation=generate_image "
+                "category=circuit_open breaker_state=%s",
+                self._circuit_breaker.state,
+            )
             raise ImageServiceError(
-                "真实图片 API 调用失败",
-                status_code=status_code,
-                error_code=error_code,
+                "真实图片 API 暂时不可用",
+                category="circuit_open",
             ) from None
 
-        content = await self._extract_image_bytes(response)
+        permit = None
+        try:
+            async with self._provider_semaphore:
+                await self._rate_limiter.acquire()
+                try:
+                    permit = await self._circuit_breaker.before_call(
+                        admission_generation
+                    )
+                except ProviderCircuitOpenError:
+                    logger.warning(
+                        "provider_circuit_open provider=image "
+                        "operation=generate_image category=circuit_open "
+                        "breaker_state=%s",
+                        self._circuit_breaker.state,
+                    )
+                    raise ImageServiceError(
+                        "真实图片 API 暂时不可用",
+                        category="circuit_open",
+                    ) from None
+
+                logger.info(
+                    "provider_call_started provider=image operation=generate_image"
+                )
+                try:
+                    response = await self._client.images.generate(
+                        model=self.model,
+                        prompt=prompt,
+                        size=self.size,
+                        quality=self.quality,
+                        output_format=self.output_format,
+                        moderation=self.moderation,
+                        n=self.n,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    category = classify_provider_failure(exc)
+                    status_code, error_code = _provider_error_metadata(exc)
+                    breaker_state = await self._circuit_breaker.record_failure(
+                        permit,
+                        eligible=is_breaker_failure(category),
+                    )
+                    logger.warning(
+                        "provider_call_failed provider=image "
+                        "operation=generate_image category=%s attempt=1 "
+                        "max_attempts=1 breaker_state=%s error_type=%s",
+                        category,
+                        breaker_state,
+                        type(exc).__name__,
+                    )
+                    raise ImageServiceError(
+                        "真实图片 API 调用失败",
+                        status_code=status_code,
+                        error_code=error_code,
+                        category=category,
+                    ) from None
+
+                try:
+                    content = await self._extract_image_bytes(response)
+                except asyncio.CancelledError:
+                    raise
+                except ImageResponseError as exc:
+                    category = exc.category or "provider_error"
+                    breaker_state = await self._circuit_breaker.record_failure(
+                        permit,
+                        eligible=is_breaker_failure(category),
+                    )
+                    logger.warning(
+                        "provider_call_failed provider=image "
+                        "operation=fetch_image category=%s attempt=1 "
+                        "max_attempts=1 breaker_state=%s error_type=%s",
+                        category,
+                        breaker_state,
+                        type(exc).__name__,
+                    )
+                    raise
+                except Exception as exc:
+                    category = classify_provider_failure(exc)
+                    breaker_state = await self._circuit_breaker.record_failure(
+                        permit,
+                        eligible=is_breaker_failure(category),
+                    )
+                    logger.warning(
+                        "provider_call_failed provider=image "
+                        "operation=fetch_image category=%s attempt=1 "
+                        "max_attempts=1 breaker_state=%s error_type=%s",
+                        category,
+                        breaker_state,
+                        type(exc).__name__,
+                    )
+                    raise ImageResponseError(
+                        "真实图片 API 返回结果处理失败",
+                        category=category,
+                    ) from None
+
+                await self._circuit_breaker.record_success(permit)
+        except asyncio.CancelledError:
+            if permit is not None:
+                await self._circuit_breaker.cancel_call(permit)
+            raise
+
         try:
             public_url = await asyncio.to_thread(self._persist_sync, content)
         except ImageServiceError:
             raise
         except Exception:
             raise ImageServiceError("图片持久化失败") from None
-        logger.info("Image persisted public_url=%s", public_url)
+        logger.info("Image persisted successfully")
         return public_url
 
     async def generate_images(self, visual_points: list[str]) -> list[str]:
@@ -329,4 +466,7 @@ def get_image_service() -> ImageServiceProtocol:
         output_dir=settings.resolved_image_output_dir,
         public_prefix=settings.image_public_prefix,
         timeout_seconds=settings.image_timeout_seconds,
+        requests_per_minute=settings.image_requests_per_minute,
+        breaker_failure_threshold=settings.provider_breaker_failure_threshold,
+        breaker_cooldown_seconds=settings.provider_breaker_cooldown_seconds,
     )

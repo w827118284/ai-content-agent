@@ -87,6 +87,27 @@ class Settings(BaseSettings):
         default="deepseek-v4-pro",
         validation_alias="LLM_MODEL",
     )
+    llm_max_concurrency: int = Field(
+        default=4,
+        ge=1,
+        validation_alias="LLM_MAX_CONCURRENCY",
+    )
+    llm_requests_per_minute: int = Field(
+        default=30,
+        ge=1,
+        validation_alias="LLM_REQUESTS_PER_MINUTE",
+    )
+    llm_max_attempts: int = Field(
+        default=2,
+        ge=1,
+        le=2,
+        validation_alias="LLM_MAX_ATTEMPTS",
+    )
+    llm_retry_base_delay_seconds: float = Field(
+        default=0.5,
+        ge=0,
+        validation_alias="LLM_RETRY_BASE_DELAY_SECONDS",
+    )
     use_mock_image: bool = Field(default=True, validation_alias="USE_MOCK_IMAGE")
     image_api_key: SecretStr | None = Field(
         default=None,
@@ -128,6 +149,21 @@ class Settings(BaseSettings):
         default=3,
         ge=1,
         validation_alias="IMAGE_MAX_CONCURRENCY",
+    )
+    image_requests_per_minute: int = Field(
+        default=10,
+        ge=1,
+        validation_alias="IMAGE_REQUESTS_PER_MINUTE",
+    )
+    provider_breaker_failure_threshold: int = Field(
+        default=3,
+        ge=1,
+        validation_alias="PROVIDER_BREAKER_FAILURE_THRESHOLD",
+    )
+    provider_breaker_cooldown_seconds: float = Field(
+        default=30,
+        gt=0,
+        validation_alias="PROVIDER_BREAKER_COOLDOWN_SECONDS",
     )
 
     @field_validator("cors_origins", mode="before")

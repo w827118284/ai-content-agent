@@ -15,22 +15,37 @@ from app.services.llm_service import (
     LLMServiceError,
     get_llm_service,
 )
+from app.services.provider_guard import CircuitBreaker
 
 
 def run(coroutine):
     return asyncio.run(coroutine)
 
 
-def build_service(*responses: AIMessage):
+class StatusProviderError(RuntimeError):
+    def __init__(self, status_code: int, message: str = "unit-test failure") -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def build_service(*responses: object, **service_options):
     client = MagicMock()
     client.ainvoke = AsyncMock(side_effect=responses)
+    service_options.setdefault("retry_sleep", AsyncMock())
     with patch("app.services.llm_service.ChatOpenAI", return_value=client):
         service = LLMService(
             api_key="unit-test-placeholder",
             base_url="https://unit.invalid/v1",
             model="unit-test-model",
+            **service_options,
         )
     return service, client
+
+
+def topic_response() -> AIMessage:
+    return AIMessage(
+        content=json.dumps({"topics": [f"技术选题 {index}" for index in range(1, 6)]})
+    )
 
 
 def test_settings_read_unprefixed_llm_environment_variables(monkeypatch):
@@ -38,6 +53,10 @@ def test_settings_read_unprefixed_llm_environment_variables(monkeypatch):
     monkeypatch.setenv("LLM_API_KEY", "unit-test-placeholder")
     monkeypatch.setenv("LLM_BASE_URL", "https://unit.invalid/v1")
     monkeypatch.setenv("LLM_MODEL", "unit-test-model")
+    monkeypatch.setenv("LLM_MAX_CONCURRENCY", "2")
+    monkeypatch.setenv("LLM_REQUESTS_PER_MINUTE", "12")
+    monkeypatch.setenv("LLM_MAX_ATTEMPTS", "2")
+    monkeypatch.setenv("LLM_RETRY_BASE_DELAY_SECONDS", "0.25")
 
     configured = Settings(_env_file=None)
 
@@ -45,6 +64,10 @@ def test_settings_read_unprefixed_llm_environment_variables(monkeypatch):
     assert configured.llm_api_key == SecretStr("unit-test-placeholder")
     assert configured.llm_base_url == "https://unit.invalid/v1"
     assert configured.llm_model == "unit-test-model"
+    assert configured.llm_max_concurrency == 2
+    assert configured.llm_requests_per_minute == 12
+    assert configured.llm_max_attempts == 2
+    assert configured.llm_retry_base_delay_seconds == 0.25
 
 
 def test_service_selector_keeps_mock_default_and_builds_real_mode(monkeypatch):
@@ -124,6 +147,230 @@ def test_plan_topics_rejects_an_invalid_topic_count():
 
     with pytest.raises(LLMResponseError, match="数据格式不符合要求"):
         run(service.plan_topics("LangGraph"))
+    assert service._client.ainvoke.await_count == 1
+
+
+def test_timeout_retries_once_then_succeeds():
+    limiter = MagicMock()
+    limiter.acquire = AsyncMock()
+    service, client = build_service(
+        TimeoutError("unit-test transient timeout"),
+        topic_response(),
+        rate_limiter=limiter,
+    )
+
+    topics = run(service.plan_topics("LangGraph"))
+
+    assert len(topics) == 5
+    assert client.ainvoke.await_count == 2
+    assert limiter.acquire.await_count == 2
+
+
+def test_rate_limit_retries_once_then_succeeds():
+    service, client = build_service(
+        StatusProviderError(429),
+        topic_response(),
+    )
+
+    assert len(run(service.plan_topics("LangGraph"))) == 5
+    assert client.ainvoke.await_count == 2
+
+
+def test_server_error_retries_once_then_returns_sanitized_failure():
+    service, client = build_service(
+        StatusProviderError(500),
+        StatusProviderError(503),
+    )
+
+    with pytest.raises(LLMServiceError) as exc_info:
+        run(service.plan_topics("LangGraph"))
+
+    assert str(exc_info.value) == "真实 LLM API 调用失败"
+    assert exc_info.value.category == "server_error"
+    assert client.ainvoke.await_count == 2
+
+
+@pytest.mark.parametrize(
+    ("status_code", "category"),
+    [
+        (400, "bad_request"),
+        (401, "authentication"),
+        (403, "permission"),
+        (404, "not_found"),
+    ],
+)
+def test_nonretryable_http_failure_uses_one_attempt(status_code, category):
+    service, client = build_service(StatusProviderError(status_code))
+
+    with pytest.raises(LLMServiceError) as exc_info:
+        run(service.plan_topics("LangGraph"))
+
+    assert exc_info.value.category == category
+    assert client.ainvoke.await_count == 1
+
+
+def test_connection_failure_retries_once():
+    service, client = build_service(
+        ConnectionError("unit-test connection failure"),
+        topic_response(),
+    )
+
+    assert len(run(service.plan_topics("LangGraph"))) == 5
+    assert client.ainvoke.await_count == 2
+
+
+def test_llm_max_concurrency_limits_provider_dispatch():
+    async def exercise():
+        service, client = build_service(max_concurrency=2)
+        active_calls = 0
+        max_active_calls = 0
+        first_two_started = asyncio.Event()
+        release_calls = asyncio.Event()
+
+        async def controlled_invoke(_messages):
+            nonlocal active_calls, max_active_calls
+            active_calls += 1
+            max_active_calls = max(max_active_calls, active_calls)
+            if active_calls == 2:
+                first_two_started.set()
+            await release_calls.wait()
+            active_calls -= 1
+            return topic_response()
+
+        client.ainvoke.side_effect = controlled_invoke
+        tasks = [
+            asyncio.create_task(service.plan_topics(f"LangGraph {index}"))
+            for index in range(4)
+        ]
+        await asyncio.wait_for(first_two_started.wait(), timeout=1)
+
+        assert client.ainvoke.await_count == 2
+        release_calls.set()
+        results = await asyncio.gather(*tasks)
+
+        assert all(len(topics) == 5 for topics in results)
+        assert client.ainvoke.await_count == 4
+        assert max_active_calls == 2
+
+    run(exercise())
+
+
+def test_queued_llm_operation_cannot_bypass_newly_open_circuit():
+    async def exercise():
+        breaker = CircuitBreaker(1, 30)
+        provider_started = asyncio.Event()
+        release_failure = asyncio.Event()
+        second_operation_checked = asyncio.Event()
+        check_count = 0
+        original_check = breaker.check_available
+
+        async def observed_check() -> int:
+            nonlocal check_count
+            admission_generation = await original_check()
+            check_count += 1
+            if check_count == 2:
+                second_operation_checked.set()
+            return admission_generation
+
+        breaker.check_available = observed_check  # type: ignore[method-assign]
+        service, client = build_service(
+            max_attempts=1,
+            max_concurrency=1,
+            circuit_breaker=breaker,
+        )
+
+        async def controlled_invoke(_messages):
+            provider_started.set()
+            await release_failure.wait()
+            raise TimeoutError("unit-test queued failure")
+
+        client.ainvoke.side_effect = controlled_invoke
+        first = asyncio.create_task(service.plan_topics("first"))
+        await provider_started.wait()
+        second = asyncio.create_task(service.plan_topics("second"))
+        await second_operation_checked.wait()
+        release_failure.set()
+        first_result, second_result = await asyncio.gather(
+            first,
+            second,
+            return_exceptions=True,
+        )
+
+        assert isinstance(first_result, LLMServiceError)
+        assert first_result.category == "timeout"
+        assert isinstance(second_result, LLMServiceError)
+        assert second_result.category == "circuit_open"
+        assert client.ainvoke.await_count == 1
+
+    run(exercise())
+
+
+def test_llm_retry_rechecks_circuit_before_second_dispatch():
+    async def exercise():
+        breaker = CircuitBreaker(1, 30)
+        retry_started = asyncio.Event()
+        release_retry = asyncio.Event()
+
+        async def controlled_retry_sleep(_delay: float) -> None:
+            retry_started.set()
+            await release_retry.wait()
+
+        retrying_service, retrying_client = build_service(
+            TimeoutError("unit-test first attempt"),
+            topic_response(),
+            circuit_breaker=breaker,
+            retry_sleep=controlled_retry_sleep,
+        )
+        failing_service, failing_client = build_service(
+            TimeoutError("unit-test breaker opener"),
+            circuit_breaker=breaker,
+            max_attempts=1,
+        )
+
+        retrying_operation = asyncio.create_task(
+            retrying_service.plan_topics("retrying operation")
+        )
+        await retry_started.wait()
+
+        with pytest.raises(LLMServiceError) as opener_error:
+            await failing_service.plan_topics("breaker opener")
+        assert opener_error.value.category == "timeout"
+        assert breaker.state == "open"
+
+        release_retry.set()
+        with pytest.raises(LLMServiceError) as retry_error:
+            await retrying_operation
+
+        assert retry_error.value.category == "circuit_open"
+        assert retrying_client.ainvoke.await_count == 1
+        assert failing_client.ainvoke.await_count == 1
+        assert breaker.consecutive_failures == 1
+
+    run(exercise())
+
+
+def test_breaker_counts_final_operation_failure_once_and_fast_fails():
+    breaker = CircuitBreaker(2, 30)
+    service, client = build_service(
+        TimeoutError("operation one attempt one"),
+        TimeoutError("operation one attempt two"),
+        TimeoutError("operation two attempt one"),
+        TimeoutError("operation two attempt two"),
+        circuit_breaker=breaker,
+    )
+
+    for _ in range(2):
+        with pytest.raises(LLMServiceError, match="真实 LLM API 调用失败"):
+            run(service.plan_topics("LangGraph"))
+
+    assert client.ainvoke.await_count == 4
+    assert breaker.consecutive_failures == 2
+    assert breaker.state == "open"
+
+    with pytest.raises(LLMServiceError) as exc_info:
+        run(service.plan_topics("LangGraph"))
+    assert exc_info.value.category == "circuit_open"
+    assert client.ainvoke.await_count == 4
 
 
 def test_write_article_builds_initial_generation_prompt():
@@ -212,6 +459,35 @@ def test_real_llm_api_failure_raises_a_clear_service_error():
         )
     )
     assert "provider unavailable" not in formatted
+
+
+def test_llm_failure_logging_excludes_raw_exception_details(caplog):
+    sensitive_detail = (
+        "provider raw failure api_key=secret-value Bearer secret-jwt"
+    )
+    service, _ = build_service(
+        StatusProviderError(500, sensitive_detail),
+        max_attempts=1,
+    )
+    caplog.set_level("WARNING", logger="app.services.llm_service")
+
+    with pytest.raises(LLMServiceError) as exc_info:
+        run(service.plan_topics("sensitive topic"))
+
+    formatted = "".join(
+        traceback.format_exception(
+            type(exc_info.value),
+            exc_info.value,
+            exc_info.value.__traceback__,
+        )
+    )
+    assert sensitive_detail not in formatted
+    assert sensitive_detail not in caplog.text
+    assert "secret-value" not in caplog.text
+    assert "secret-jwt" not in caplog.text
+    assert "provider=llm" in caplog.text
+    assert "category=server_error" in caplog.text
+    assert "StatusProviderError" in caplog.text
 
 
 @pytest.mark.skip(reason="真实文字 Provider 仅通过显式 smoke test 调用")

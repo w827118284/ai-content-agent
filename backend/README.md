@@ -45,9 +45,13 @@ USE_MOCK_LLM=false
 LLM_API_KEY=
 LLM_BASE_URL=https://api.deepseek.com
 LLM_MODEL=deepseek-v4-pro
+LLM_MAX_CONCURRENCY=4
+LLM_REQUESTS_PER_MINUTE=30
+LLM_MAX_ATTEMPTS=2
+LLM_RETRY_BASE_DELAY_SECONDS=0.5
 ```
 
-真实文字模型通过 DeepSeek 的 OpenAI-compatible Chat Completions API 调用，SDK 自动重试关闭。项目只从本地环境变量读取 `LLM_API_KEY`，不会读取 Codex CLI 配置或 `~/.codex/auth.json`；工作流状态仍由 LangGraph Checkpointer 管理。
+真实文字模型通过 DeepSeek 的 OpenAI-compatible Chat Completions API 调用，SDK 自动重试保持关闭。只有 timeout、connection、HTTP 429 和 HTTP 5xx 会进行最多一次 application-level retry，因此每个 LLM operation 最多 2 次总 attempt。400、401、403、404 与业务 JSON/响应解析失败不会 retry。项目只从本地环境变量读取 `LLM_API_KEY`，不会读取 Codex CLI 配置或 `~/.codex/auth.json`；工作流状态仍由 LangGraph Checkpointer 管理。
 
 ## LangSmith 可观测性
 
@@ -80,12 +84,28 @@ IMAGE_OUTPUT_FORMAT=png
 IMAGE_MODERATION=auto
 IMAGE_N=1
 IMAGE_MAX_CONCURRENCY=3
+IMAGE_REQUESTS_PER_MINUTE=10
 IMAGE_OUTPUT_DIR=outputs/images
 IMAGE_PUBLIC_PREFIX=/media/images
 IMAGE_TIMEOUT_SECONDS=300
 ```
 
-服务通过 OpenAI-compatible `images/generations` 接口生成图片，同时支持 `b64_json` 和临时 `url` 响应。图片会立即保存到 `IMAGE_OUTPUT_DIR`，State 中只记录 `/media/images/<filename>` 形式的相对公开 URL。真实生图请求关闭 SDK 自动重试，避免收费 POST 被盲目重复执行。
+服务通过 OpenAI-compatible `images/generations` 接口生成图片，同时支持 `b64_json` 和临时 `url` 响应。图片会立即保存到 `IMAGE_OUTPUT_DIR`，State 中只记录 `/media/images/<filename>` 形式的相对公开 URL。真实生图请求的 SDK 与 application-level 自动 retry 均关闭：timeout、connection、429 或 5xx 也只发送 1 次收费 POST，因为客户端无法判断 Provider 是否已经接受请求或扣费。
+
+## Provider 调用治理
+
+真实 LLM 与真实图片 Provider 分别维护独立的进程内并发限制、每分钟请求限制和 circuit breaker；Mock Provider 完全绕过这些治理状态：
+
+```dotenv
+PROVIDER_BREAKER_FAILURE_THRESHOLD=3
+PROVIDER_BREAKER_COOLDOWN_SECONDS=30
+```
+
+breaker 只统计 timeout、connection、HTTP 429 和 HTTP 5xx。连续达到阈值后进入 OPEN，cooldown 到期后只允许一个 HALF_OPEN probe；成功恢复 CLOSED，失败重新 OPEN。401、403、400、404、业务解析和用户输入错误不计入 breaker。
+
+日志仅记录 provider、固定 operation、安全 category、attempt、breaker state 和异常类型，不记录 prompt、主题、文章、feedback、图片 URL、API Key、Authorization 或 raw Provider exception。
+
+当前 rate limiter 和 circuit breaker 都是 process-local：它们不跨 backend replica 共享，breaker 状态也不会在服务重启后持久化。多 replica 部署需要在 Redis、API gateway 或 Provider gateway 层实现分布式全局限流与协调保护。
 
 ## Checkpointer 模式
 

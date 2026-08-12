@@ -1,4 +1,6 @@
+import asyncio
 import json
+import logging
 from typing import TypeVar
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
@@ -8,6 +10,18 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from app.core.config import settings
 from app.graph.state import TopicOption
 from app.services.llm_mock import MockLLMService
+from app.services.provider_guard import (
+    AsyncSleep,
+    CircuitBreaker,
+    ProviderCircuitOpenError,
+    ProviderFailureCategory,
+    SlidingWindowRateLimiter,
+    classify_provider_failure,
+    is_breaker_failure,
+)
+
+
+logger = logging.getLogger(__name__)
 
 
 TOPIC_SYSTEM_PROMPT = """你是 AI 编程教育公司的资深技术内容策划。
@@ -26,6 +40,15 @@ VISUAL_SYSTEM_PROMPT = """你是技术内容视觉编辑。
 
 class LLMServiceError(RuntimeError):
     """Raised when the real LLM cannot produce a usable business response."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        category: ProviderFailureCategory | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.category = category
 
 
 class LLMConfigurationError(LLMServiceError):
@@ -96,8 +119,8 @@ def _parse_json_response(
     try:
         payload, _ = json.JSONDecoder().raw_decode(text[object_start:])
         return response_model.model_validate(payload)
-    except (json.JSONDecodeError, ValidationError) as exc:
-        raise LLMResponseError("真实 LLM 返回的数据格式不符合要求") from exc
+    except (json.JSONDecodeError, ValidationError):
+        raise LLMResponseError("真实 LLM 返回的数据格式不符合要求") from None
 
 
 class LLMService:
@@ -107,6 +130,15 @@ class LLMService:
         api_key: str | None,
         base_url: str | None,
         model: str | None,
+        max_concurrency: int = 4,
+        requests_per_minute: int = 30,
+        max_attempts: int = 2,
+        retry_base_delay_seconds: float = 0.5,
+        breaker_failure_threshold: int = 3,
+        breaker_cooldown_seconds: float = 30,
+        rate_limiter: SlidingWindowRateLimiter | None = None,
+        circuit_breaker: CircuitBreaker | None = None,
+        retry_sleep: AsyncSleep = asyncio.sleep,
     ) -> None:
         normalized_api_key = api_key.strip() if api_key else ""
         normalized_model = model.strip() if model else ""
@@ -114,6 +146,14 @@ class LLMService:
             raise LLMConfigurationError("真实 LLM 模式缺少 LLM_API_KEY")
         if not normalized_model:
             raise LLMConfigurationError("真实 LLM 模式缺少 LLM_MODEL")
+        if max_concurrency < 1:
+            raise LLMConfigurationError("LLM_MAX_CONCURRENCY 必须大于 0")
+        if requests_per_minute < 1:
+            raise LLMConfigurationError("LLM_REQUESTS_PER_MINUTE 必须大于 0")
+        if max_attempts not in {1, 2}:
+            raise LLMConfigurationError("LLM_MAX_ATTEMPTS 必须为 1 或 2")
+        if retry_base_delay_seconds < 0:
+            raise LLMConfigurationError("LLM_RETRY_BASE_DELAY_SECONDS 不能小于 0")
         client_options = {
             "model": normalized_model,
             "api_key": normalized_api_key,
@@ -123,19 +163,140 @@ class LLMService:
             client_options["base_url"] = base_url.strip()
 
         self._client = ChatOpenAI(**client_options)
+        self.max_attempts = max_attempts
+        self._retry_base_delay_seconds = retry_base_delay_seconds
+        self._retry_sleep = retry_sleep
+        self._semaphore = asyncio.Semaphore(max_concurrency)
+        self._rate_limiter = rate_limiter or SlidingWindowRateLimiter(
+            requests_per_minute
+        )
+        self._circuit_breaker = circuit_breaker or CircuitBreaker(
+            breaker_failure_threshold,
+            breaker_cooldown_seconds,
+        )
 
-    async def _invoke(self, system_prompt: str, user_prompt: str) -> str:
+    async def _invoke(
+        self,
+        operation: str,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> str:
         messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_prompt),
         ]
         try:
-            response = await self._client.ainvoke(messages)
-        except Exception:
-            sanitized_error = LLMServiceError("真实 LLM API 调用失败")
-        else:
-            return _message_text(response)
-        raise sanitized_error from None
+            admission_generation = (
+                await self._circuit_breaker.check_available()
+            )
+        except ProviderCircuitOpenError:
+            logger.warning(
+                "provider_circuit_open provider=llm operation=%s "
+                "category=circuit_open breaker_state=%s",
+                operation,
+                self._circuit_breaker.state,
+            )
+            raise LLMServiceError(
+                "真实 LLM API 暂时不可用",
+                category="circuit_open",
+            ) from None
+
+        permit = None
+        last_retry_category: ProviderFailureCategory | None = None
+        try:
+            for attempt in range(1, self.max_attempts + 1):
+                async with self._semaphore:
+                    await self._rate_limiter.acquire()
+                    try:
+                        if permit is None:
+                            permit = await self._circuit_breaker.before_call(
+                                admission_generation
+                            )
+                        else:
+                            await self._circuit_breaker.validate_before_dispatch(
+                                permit
+                            )
+                    except ProviderCircuitOpenError:
+                        if permit is not None:
+                            await self._circuit_breaker.record_failure(
+                                permit,
+                                eligible=(
+                                    last_retry_category is not None
+                                    and is_breaker_failure(last_retry_category)
+                                ),
+                            )
+                        logger.warning(
+                            "provider_circuit_open provider=llm operation=%s "
+                            "category=circuit_open attempt=%s max_attempts=%s "
+                            "breaker_state=%s",
+                            operation,
+                            attempt,
+                            self.max_attempts,
+                            self._circuit_breaker.state,
+                        )
+                        raise LLMServiceError(
+                            "真实 LLM API 暂时不可用",
+                            category="circuit_open",
+                        ) from None
+
+                    try:
+                        response = await self._client.ainvoke(messages)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        category = classify_provider_failure(exc)
+                        can_retry = (
+                            is_breaker_failure(category)
+                            and attempt < self.max_attempts
+                        )
+                        if can_retry:
+                            last_retry_category = category
+                            logger.warning(
+                                "provider_call_failed provider=llm operation=%s "
+                                "category=%s attempt=%s max_attempts=%s "
+                                "breaker_state=%s error_type=%s",
+                                operation,
+                                category,
+                                attempt,
+                                self.max_attempts,
+                                self._circuit_breaker.state,
+                                type(exc).__name__,
+                            )
+                        else:
+                            breaker_state = (
+                                await self._circuit_breaker.record_failure(
+                                    permit,
+                                    eligible=is_breaker_failure(category),
+                                )
+                            )
+                            logger.warning(
+                                "provider_call_failed provider=llm operation=%s "
+                                "category=%s attempt=%s max_attempts=%s "
+                                "breaker_state=%s error_type=%s",
+                                operation,
+                                category,
+                                attempt,
+                                self.max_attempts,
+                                breaker_state,
+                                type(exc).__name__,
+                            )
+                            raise LLMServiceError(
+                                "真实 LLM API 调用失败",
+                                category=category,
+                            ) from None
+
+                if last_retry_category is not None and attempt < self.max_attempts:
+                    await self._retry_sleep(self._retry_base_delay_seconds)
+                    continue
+
+                await self._circuit_breaker.record_success(permit)
+                return _message_text(response)
+        except asyncio.CancelledError:
+            if permit is not None:
+                await self._circuit_breaker.cancel_call(permit)
+            raise
+
+        raise RuntimeError("LLM retry loop ended unexpectedly")
 
     async def plan_topics(self, topic_direction: str) -> list[TopicOption]:
         user_prompt = (
@@ -145,7 +306,11 @@ class LLMService:
             "只返回 JSON 对象，不要添加解释或 Markdown。格式：\n"
             '{"topics": ["选题1", "选题2", "选题3", "选题4", "选题5"]}'
         )
-        raw_response = await self._invoke(TOPIC_SYSTEM_PROMPT, user_prompt)
+        raw_response = await self._invoke(
+            "generate_topics",
+            TOPIC_SYSTEM_PROMPT,
+            user_prompt,
+        )
         parsed = _parse_json_response(raw_response, _TopicPlanResponse)
         return [
             {"id": f"topic_{index}", "title": title}
@@ -184,7 +349,11 @@ class LLMService:
             "- 减少空泛背景，不虚构不存在的 API\n"
             "- 不写成营销软文\n"
         )
-        return await self._invoke(ARTICLE_SYSTEM_PROMPT, user_prompt)
+        return await self._invoke(
+            "write_article",
+            ARTICLE_SYSTEM_PROMPT,
+            user_prompt,
+        )
 
     async def extract_visual_points(
         self,
@@ -200,7 +369,11 @@ class LLMService:
             "只返回 JSON 对象，不要添加解释或 Markdown。格式：\n"
             '{"visual_points": ["知识点1", "知识点2", "知识点3"]}'
         )
-        raw_response = await self._invoke(VISUAL_SYSTEM_PROMPT, user_prompt)
+        raw_response = await self._invoke(
+            "extract_visual_points",
+            VISUAL_SYSTEM_PROMPT,
+            user_prompt,
+        )
         parsed = _parse_json_response(raw_response, _VisualPointsResponse)
         return parsed.visual_points
 
@@ -216,4 +389,10 @@ def get_llm_service() -> MockLLMService | LLMService:
         ),
         base_url=settings.llm_base_url,
         model=settings.llm_model,
+        max_concurrency=settings.llm_max_concurrency,
+        requests_per_minute=settings.llm_requests_per_minute,
+        max_attempts=settings.llm_max_attempts,
+        retry_base_delay_seconds=settings.llm_retry_base_delay_seconds,
+        breaker_failure_threshold=settings.provider_breaker_failure_threshold,
+        breaker_cooldown_seconds=settings.provider_breaker_cooldown_seconds,
     )

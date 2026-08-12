@@ -4,6 +4,7 @@ import traceback
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from pydantic import SecretStr
 
@@ -17,6 +18,7 @@ from app.services.image_service import (
     build_image_prompt,
     get_image_service,
 )
+from app.services.provider_guard import CircuitBreaker
 
 
 def run(coroutine):
@@ -27,7 +29,20 @@ def image_response(*, b64_json: str | None = None, url: str | None = None):
     return SimpleNamespace(data=[SimpleNamespace(b64_json=b64_json, url=url)])
 
 
-def build_service(tmp_path, *, max_concurrency: int = 3, response=None):
+class StatusProviderError(RuntimeError):
+    def __init__(self, status_code: int, message: str = "unit-test failure") -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def build_service(
+    tmp_path,
+    *,
+    max_concurrency: int = 3,
+    response=None,
+    circuit_breaker=None,
+    rate_limiter=None,
+):
     client = MagicMock()
     client.images.generate = AsyncMock(
         return_value=response
@@ -50,6 +65,8 @@ def build_service(tmp_path, *, max_concurrency: int = 3, response=None):
         timeout_seconds=300,
         client=client,
         download_client=download_client,
+        circuit_breaker=circuit_breaker,
+        rate_limiter=rate_limiter,
     )
     return service, client, download_client
 
@@ -66,6 +83,9 @@ def test_image_settings_default_to_mock():
     assert configured.resolved_image_output_dir.parent.name == "outputs"
     assert configured.image_n == 1
     assert configured.image_max_concurrency == 3
+    assert configured.image_requests_per_minute == 10
+    assert configured.provider_breaker_failure_threshold == 3
+    assert configured.provider_breaker_cooldown_seconds == 30
 
 
 def test_image_settings_read_real_mode_environment(monkeypatch):
@@ -79,6 +99,9 @@ def test_image_settings_read_real_mode_environment(monkeypatch):
     monkeypatch.setenv("IMAGE_MODERATION", "auto")
     monkeypatch.setenv("IMAGE_N", "1")
     monkeypatch.setenv("IMAGE_MAX_CONCURRENCY", "2")
+    monkeypatch.setenv("IMAGE_REQUESTS_PER_MINUTE", "8")
+    monkeypatch.setenv("PROVIDER_BREAKER_FAILURE_THRESHOLD", "4")
+    monkeypatch.setenv("PROVIDER_BREAKER_COOLDOWN_SECONDS", "15")
 
     configured = Settings(_env_file=None)
 
@@ -87,6 +110,9 @@ def test_image_settings_read_real_mode_environment(monkeypatch):
     assert configured.image_api_key.get_secret_value() == "unit-test-image-key"
     assert configured.image_output_format == "webp"
     assert configured.image_max_concurrency == 2
+    assert configured.image_requests_per_minute == 8
+    assert configured.provider_breaker_failure_threshold == 4
+    assert configured.provider_breaker_cooldown_seconds == 15
 
 
 def test_real_selector_requires_image_api_key(monkeypatch):
@@ -198,15 +224,310 @@ def test_generate_image_wraps_provider_errors_without_message_leak(tmp_path):
     assert str(error) == "真实图片 API 调用失败"
     assert error.status_code == 429
     assert error.error_code == "RateLimitExceeded"
+    assert error.category == "rate_limit"
     assert "sensitive-details" not in formatted
+    assert client.images.generate.await_count == 1
 
 
-def test_generate_image_timeout_is_terminal_and_sanitized(tmp_path):
-    service, client, _ = build_service(tmp_path)
-    client.images.generate.side_effect = TimeoutError("provider timed out with secret")
+@pytest.mark.parametrize(
+    ("provider_error", "category"),
+    [
+        (TimeoutError("unit-test timeout"), "timeout"),
+        (StatusProviderError(429), "rate_limit"),
+        (StatusProviderError(500), "server_error"),
+        (ConnectionError("unit-test connection"), "connection"),
+    ],
+)
+def test_generate_image_provider_failures_never_retry(
+    tmp_path,
+    provider_error,
+    category,
+):
+    limiter = MagicMock()
+    limiter.acquire = AsyncMock()
+    service, client, _ = build_service(tmp_path, rate_limiter=limiter)
+    client.images.generate.side_effect = provider_error
 
-    with pytest.raises(ImageServiceError, match="真实图片 API 调用失败"):
+    with pytest.raises(ImageServiceError, match="真实图片 API 调用失败") as exc_info:
         run(service.generate_image("视觉点"))
+
+    assert exc_info.value.category == category
+    assert client.images.generate.await_count == 1
+    assert limiter.acquire.await_count == 1
+
+
+def test_image_breaker_fast_fails_without_second_provider_call(tmp_path):
+    breaker = CircuitBreaker(1, 30)
+    service, client, _ = build_service(tmp_path, circuit_breaker=breaker)
+    client.images.generate.side_effect = TimeoutError("unit-test timeout")
+
+    with pytest.raises(ImageServiceError):
+        run(service.generate_image("视觉点 A"))
+    with pytest.raises(ImageServiceError) as exc_info:
+        run(service.generate_image("视觉点 B"))
+
+    assert breaker.state == "open"
+    assert exc_info.value.category == "circuit_open"
+    assert client.images.generate.await_count == 1
+
+
+def test_queued_independent_image_call_cannot_bypass_newly_open_circuit(tmp_path):
+    async def exercise():
+        breaker = CircuitBreaker(1, 30)
+        provider_started = asyncio.Event()
+        release_failure = asyncio.Event()
+        second_operation_checked = asyncio.Event()
+        check_count = 0
+        original_check = breaker.check_available
+
+        async def observed_check() -> int:
+            nonlocal check_count
+            admission_generation = await original_check()
+            check_count += 1
+            if check_count == 2:
+                second_operation_checked.set()
+            return admission_generation
+
+        breaker.check_available = observed_check  # type: ignore[method-assign]
+        service, client, _ = build_service(
+            tmp_path,
+            max_concurrency=1,
+            circuit_breaker=breaker,
+        )
+
+        async def controlled_generate(**_kwargs):
+            provider_started.set()
+            await release_failure.wait()
+            raise TimeoutError("unit-test queued image failure")
+
+        client.images.generate.side_effect = controlled_generate
+        first = asyncio.create_task(service.generate_image("first"))
+        await provider_started.wait()
+        second = asyncio.create_task(service.generate_image("second"))
+        await second_operation_checked.wait()
+        release_failure.set()
+        first_result, second_result = await asyncio.gather(
+            first,
+            second,
+            return_exceptions=True,
+        )
+
+        assert isinstance(first_result, ImageServiceError)
+        assert first_result.category == "timeout"
+        assert isinstance(second_result, ImageServiceError)
+        assert second_result.category == "circuit_open"
+        assert client.images.generate.await_count == 1
+
+    run(exercise())
+
+
+def download_status_error(status_code: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("GET", "https://images.example.test/temporary.png")
+    response = httpx.Response(status_code, request=request)
+    return httpx.HTTPStatusError(
+        "unit-test download status failure",
+        request=request,
+        response=response,
+    )
+
+
+@pytest.mark.parametrize(
+    ("download_error", "category"),
+    [
+        (TimeoutError("unit-test download timeout"), "timeout"),
+        (ConnectionError("unit-test download connection"), "connection"),
+        (download_status_error(429), "rate_limit"),
+        (download_status_error(503), "server_error"),
+    ],
+)
+def test_temporary_url_transient_failure_counts_for_breaker(
+    tmp_path,
+    download_error,
+    category,
+):
+    breaker = CircuitBreaker(3, 30)
+    service, client, download_client = build_service(
+        tmp_path,
+        response=image_response(
+            url="https://images.example.test/temporary.png"
+        ),
+        circuit_breaker=breaker,
+    )
+    download_client.get.side_effect = download_error
+
+    with pytest.raises(ImageResponseError) as exc_info:
+        run(service.generate_image("temporary URL"))
+
+    assert exc_info.value.category == category
+    assert breaker.consecutive_failures == 1
+    assert breaker.state == "closed"
+    assert client.images.generate.await_count == 1
+    assert download_client.get.await_count == 1
+
+
+def test_temporary_url_failure_logging_excludes_raw_details(
+    tmp_path,
+    caplog,
+):
+    sensitive_detail = (
+        "provider raw download failure api_key=secret-value "
+        "Bearer secret-jwt"
+    )
+    service, _, download_client = build_service(
+        tmp_path,
+        response=image_response(
+            url="https://images.example.test/temporary.png"
+        ),
+    )
+    download_client.get.side_effect = TimeoutError(sensitive_detail)
+    caplog.set_level("WARNING", logger="app.services.image_service")
+
+    with pytest.raises(ImageResponseError) as exc_info:
+        run(service.generate_image("sensitive temporary URL"))
+
+    formatted = "".join(
+        traceback.format_exception(
+            type(exc_info.value),
+            exc_info.value,
+            exc_info.value.__traceback__,
+        )
+    )
+    assert sensitive_detail not in formatted
+    assert sensitive_detail not in caplog.text
+    assert "secret-value" not in caplog.text
+    assert "secret-jwt" not in caplog.text
+    assert "images.example.test" not in caplog.text
+    assert "category=timeout" in caplog.text
+
+
+def test_temporary_url_failures_open_breaker_and_block_next_post(tmp_path):
+    breaker = CircuitBreaker(2, 30)
+    service, client, download_client = build_service(
+        tmp_path,
+        response=image_response(
+            url="https://images.example.test/temporary.png"
+        ),
+        circuit_breaker=breaker,
+    )
+    download_client.get.side_effect = TimeoutError("unit-test download timeout")
+
+    for _ in range(2):
+        with pytest.raises(ImageResponseError):
+            run(service.generate_image("temporary URL"))
+
+    with pytest.raises(ImageServiceError) as exc_info:
+        run(service.generate_image("blocked image"))
+
+    assert breaker.state == "open"
+    assert exc_info.value.category == "circuit_open"
+    assert client.images.generate.await_count == 2
+    assert download_client.get.await_count == 2
+
+
+def test_successful_url_download_records_provider_success(tmp_path):
+    breaker = CircuitBreaker(3, 30)
+    prior_failure = run(breaker.before_call())
+    run(breaker.record_failure(prior_failure, eligible=True))
+    service, _, download_client = build_service(
+        tmp_path,
+        response=image_response(
+            url="https://images.example.test/temporary.png"
+        ),
+        circuit_breaker=breaker,
+    )
+    response = MagicMock(content=b"downloaded-image")
+    response.raise_for_status.return_value = None
+    download_client.get.return_value = response
+
+    result = run(service.generate_image("successful URL"))
+
+    assert result.startswith("/media/images/")
+    assert breaker.state == "closed"
+    assert breaker.consecutive_failures == 0
+
+
+def test_local_persist_failure_does_not_count_for_provider_breaker(tmp_path):
+    breaker = CircuitBreaker(2, 30)
+    service, client, _ = build_service(tmp_path, circuit_breaker=breaker)
+    service._persist_sync = MagicMock(  # type: ignore[method-assign]
+        side_effect=OSError("unit-test local disk failure")
+    )
+
+    with pytest.raises(ImageServiceError, match="图片持久化失败"):
+        run(service.generate_image("local persist"))
+
+    assert client.images.generate.await_count == 1
+    assert breaker.state == "closed"
+    assert breaker.consecutive_failures == 0
+
+
+def test_image_max_concurrency_limits_provider_dispatch(tmp_path):
+    async def exercise():
+        service, client, _ = build_service(tmp_path, max_concurrency=2)
+        active_calls = 0
+        max_active_calls = 0
+        first_two_started = asyncio.Event()
+        release_calls = asyncio.Event()
+
+        async def controlled_generate(**_kwargs):
+            nonlocal active_calls, max_active_calls
+            active_calls += 1
+            max_active_calls = max(max_active_calls, active_calls)
+            if active_calls == 2:
+                first_two_started.set()
+            await release_calls.wait()
+            active_calls -= 1
+            return image_response(
+                b64_json=base64.b64encode(b"test-image").decode()
+            )
+
+        client.images.generate.side_effect = controlled_generate
+        tasks = [
+            asyncio.create_task(service.generate_image(f"visual point {index}"))
+            for index in range(4)
+        ]
+        await asyncio.wait_for(first_two_started.wait(), timeout=1)
+
+        assert client.images.generate.await_count == 2
+        release_calls.set()
+        urls = await asyncio.gather(*tasks)
+
+        assert len(urls) == 4
+        assert client.images.generate.await_count == 4
+        assert max_active_calls == 2
+
+    run(exercise())
+
+
+def test_image_failure_logging_excludes_raw_exception_details(
+    tmp_path,
+    caplog,
+):
+    sensitive_detail = (
+        "provider raw failure api_key=secret-value Bearer secret-jwt"
+    )
+    service, client, _ = build_service(tmp_path)
+    client.images.generate.side_effect = StatusProviderError(500, sensitive_detail)
+    caplog.set_level("WARNING", logger="app.services.image_service")
+
+    with pytest.raises(ImageServiceError) as exc_info:
+        run(service.generate_image("sensitive visual prompt"))
+
+    formatted = "".join(
+        traceback.format_exception(
+            type(exc_info.value),
+            exc_info.value,
+            exc_info.value.__traceback__,
+        )
+    )
+    assert sensitive_detail not in formatted
+    assert sensitive_detail not in caplog.text
+    assert "secret-value" not in caplog.text
+    assert "secret-jwt" not in caplog.text
+    assert "sensitive visual prompt" not in caplog.text
+    assert "provider=image" in caplog.text
+    assert "category=server_error" in caplog.text
+    assert "StatusProviderError" in caplog.text
 
 
 def test_generate_images_preserves_input_order(tmp_path):

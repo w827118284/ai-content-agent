@@ -144,10 +144,9 @@ async def generate_images(state: AgentState) -> dict[str, Any]:
         image_urls = await image_service.generate_images(state["visual_points"])
     except ImageServiceError as exc:
         logger.error(
-            "Image generation node failed error_type=%s status_code=%s error_code=%s",
+            "Image generation node failed error_type=%s category=%s",
             type(exc).__name__,
-            exc.status_code,
-            exc.error_code,
+            exc.category,
         )
         return {"status": "failed"}
     logger.info("Image generation node completed image_count=%s", len(image_urls))
