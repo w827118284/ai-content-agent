@@ -11,7 +11,7 @@ from httpx import ASGITransport, AsyncClient, Response
 from app.api.v1 import workflows as workflow_api
 from app.api.sse import encode_sse
 from app.core.config import settings
-from app.graph import nodes
+from app.graph import nodes, runner as workflow_runner
 from app.main import app
 from app.repositories.content_project_repository import (
     get_content_project_repository,
@@ -643,7 +643,11 @@ def test_get_state_does_not_touch_existing_project_updated_at(api_context):
 
 
 def test_graph_start_failure_removes_starting_ownership_row(api_context, monkeypatch):
-    async def fail_start(topic_direction: str, thread_id: str | None = None):
+    async def fail_start(
+        topic_direction: str,
+        thread_id: str | None = None,
+        **_: object,
+    ):
         raise RuntimeError(f"simulated graph failure: {topic_direction} {thread_id}")
 
     monkeypatch.setattr(workflow_api, "start_workflow", fail_start)
@@ -709,6 +713,57 @@ def test_start_stream_emits_meta_real_progress_and_interrupt(api_context):
     assert events[1][1]["node"] == "plan_topics"
     assert "state" not in events[1][1]
     assert events[2][1]["interrupt"]["type"] == "topic_selection"
+
+
+def test_rest_and_sse_routes_share_workflow_tracing_config(
+    api_context,
+    monkeypatch,
+):
+    captured_configs = []
+    original_builder = workflow_runner.build_workflow_config
+
+    def capture_config(*args, **kwargs):
+        config = original_builder(*args, **kwargs)
+        captured_configs.append(config)
+        return config
+
+    monkeypatch.setattr(workflow_runner, "build_workflow_config", capture_config)
+
+    rest_started = start_workflow(api_context)
+    select_topic(api_context, rest_started["thread_id"])
+    sse_resumed = request(
+        api_context,
+        "POST",
+        f"/api/v1/workflows/{rest_started['thread_id']}/resume/stream",
+        json={"action": "reject", "data": {"feedback": "增加代码示例"}},
+    )
+    sse_started = request(
+        api_context,
+        "POST",
+        "/api/v1/workflows/start/stream",
+        json={"topic_direction": "LangGraph tracing"},
+    )
+
+    assert sse_resumed.status_code == 200
+    assert sse_started.status_code == 200
+    assert [
+        (
+            config["metadata"]["workflow_action"],
+            config["metadata"]["transport"],
+        )
+        for config in captured_configs
+    ] == [
+        ("start", "rest"),
+        ("resume", "rest"),
+        ("resume", "sse"),
+        ("start", "sse"),
+    ]
+    for config in captured_configs:
+        metadata = config["metadata"]
+        project = api_context.project_repository.projects[metadata["thread_id"]]
+        assert metadata["project_id"] == str(project.id)
+        assert metadata["user_id"] == str(api_context.user.id)
+        assert config["configurable"]["thread_id"] == metadata["thread_id"]
 
 
 def test_resume_stream_handles_topic_reject_and_approve(api_context):

@@ -49,6 +49,22 @@ LLM_MODEL=deepseek-v4-pro
 
 真实文字模型通过 DeepSeek 的 OpenAI-compatible Chat Completions API 调用，SDK 自动重试关闭。项目只从本地环境变量读取 `LLM_API_KEY`，不会读取 Codex CLI 配置或 `~/.codex/auth.json`；工作流状态仍由 LangGraph Checkpointer 管理。
 
+## LangSmith 可观测性
+
+LangSmith tracing 是可选能力，默认关闭；没有 LangSmith Key 时不影响 Backend、REST、SSE、Mock 或真实 Provider 工作流：
+
+```dotenv
+LANGSMITH_TRACING=false
+LANGSMITH_API_KEY=
+LANGSMITH_PROJECT=ai-content-agent
+LANGSMITH_ENDPOINT=
+LANGSMITH_WORKSPACE_ID=
+LANGSMITH_HIDE_INPUTS=true
+LANGSMITH_HIDE_OUTPUTS=true
+```
+
+启用后，REST 与 SSE 都通过同一个 LangGraph `RunnableConfig` 记录顶层 workflow、Graph node 和 LangChain LLM 调用。顶层 run name 为 `content_workflow.start` 或 `content_workflow.resume`；metadata 仅包含 `thread_id`、`project_id`、`user_id`、`workflow_action`、`transport`、`llm_mode`、`image_mode`，不包含主题、文章、审核意见、JWT 或 API Key。输入输出默认隐藏，如需改变隐私策略必须显式修改对应环境变量。
+
 ## 图片模式
 
 默认 `USE_MOCK_IMAGE=true`，单元测试不会调用收费接口。使用 OpenAI-compatible Image API 时，在本地 `.env` 中配置：

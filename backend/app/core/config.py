@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -22,6 +23,34 @@ class Settings(BaseSettings):
             "http://127.0.0.1:5173",
         ],
         validation_alias="CORS_ORIGINS",
+    )
+    langsmith_tracing: bool = Field(
+        default=False,
+        validation_alias="LANGSMITH_TRACING",
+    )
+    langsmith_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias="LANGSMITH_API_KEY",
+    )
+    langsmith_project: str = Field(
+        default="ai-content-agent",
+        validation_alias="LANGSMITH_PROJECT",
+    )
+    langsmith_endpoint: str | None = Field(
+        default=None,
+        validation_alias="LANGSMITH_ENDPOINT",
+    )
+    langsmith_workspace_id: str | None = Field(
+        default=None,
+        validation_alias="LANGSMITH_WORKSPACE_ID",
+    )
+    langsmith_hide_inputs: bool = Field(
+        default=True,
+        validation_alias="LANGSMITH_HIDE_INPUTS",
+    )
+    langsmith_hide_outputs: bool = Field(
+        default=True,
+        validation_alias="LANGSMITH_HIDE_OUTPUTS",
     )
     checkpointer_backend: Literal["memory", "postgres"] = Field(
         default="memory",
@@ -123,4 +152,26 @@ class Settings(BaseSettings):
         return Path(__file__).resolve().parents[2] / output_dir
 
 
+def configure_langsmith_environment(config: Settings) -> None:
+    values = {
+        "LANGSMITH_TRACING": str(config.langsmith_tracing).lower(),
+        "LANGSMITH_PROJECT": config.langsmith_project,
+        "LANGSMITH_HIDE_INPUTS": str(config.langsmith_hide_inputs).lower(),
+        "LANGSMITH_HIDE_OUTPUTS": str(config.langsmith_hide_outputs).lower(),
+    }
+    optional_values = {
+        "LANGSMITH_API_KEY": (
+            config.langsmith_api_key.get_secret_value()
+            if config.langsmith_api_key is not None
+            else None
+        ),
+        "LANGSMITH_ENDPOINT": config.langsmith_endpoint,
+        "LANGSMITH_WORKSPACE_ID": config.langsmith_workspace_id,
+    }
+    for name, value in {**values, **optional_values}.items():
+        if value is not None:
+            os.environ[name] = value
+
+
 settings = Settings()
+configure_langsmith_environment(settings)

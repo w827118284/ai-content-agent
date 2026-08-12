@@ -1,5 +1,8 @@
 import asyncio
+import os
 import sys
+
+os.environ["LANGSMITH_TRACING"] = "false"
 
 import pytest
 from pydantic import SecretStr
@@ -16,6 +19,8 @@ if sys.platform == "win32":
 
 @pytest.fixture(autouse=True)
 def jwt_test_configuration(monkeypatch):
+    monkeypatch.setenv("LANGSMITH_TRACING", "false")
+    monkeypatch.setattr(settings, "langsmith_tracing", False)
     monkeypatch.setenv(
         "JWT_SECRET_KEY",
         "unit-test-jwt-secret-at-least-32-bytes",

@@ -1,10 +1,12 @@
 import logging
 from collections.abc import AsyncIterator
 from typing import Any, Literal, TypedDict
-from uuid import uuid4
+from uuid import UUID, uuid4
 
+from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
+from app.core.config import settings
 from app.graph.nodes import WorkflowNodeInputError
 from app.graph.runtime import get_content_workflow
 from app.graph.state import AgentState
@@ -36,10 +38,62 @@ class WorkflowResultUpdate(TypedDict):
 
 
 WorkflowStreamUpdate = WorkflowProgressUpdate | WorkflowResultUpdate
+WorkflowAction = Literal["start", "resume"]
+WorkflowTransport = Literal["rest", "sse"]
+
+WORKFLOW_METADATA_ALLOWLIST = frozenset(
+    {
+        "thread_id",
+        "project_id",
+        "user_id",
+        "workflow_action",
+        "transport",
+        "llm_mode",
+        "image_mode",
+        "environment",
+    }
+)
 
 
-def _graph_config(thread_id: str) -> dict[str, dict[str, str]]:
+def _graph_config(thread_id: str) -> RunnableConfig:
     return {"configurable": {"thread_id": thread_id}}
+
+
+def build_workflow_config(
+    thread_id: str,
+    *,
+    action: WorkflowAction,
+    transport: WorkflowTransport,
+    project_id: UUID | str | None = None,
+    user_id: UUID | str | None = None,
+) -> RunnableConfig:
+    llm_mode = "mock" if settings.use_mock_llm else "real"
+    image_mode = "mock" if settings.use_mock_image else "real"
+    metadata = {
+        "thread_id": thread_id,
+        "workflow_action": action,
+        "transport": transport,
+        "llm_mode": llm_mode,
+        "image_mode": image_mode,
+    }
+    if project_id is not None:
+        metadata["project_id"] = str(project_id)
+    if user_id is not None:
+        metadata["user_id"] = str(user_id)
+
+    return {
+        "configurable": {"thread_id": thread_id},
+        "run_name": f"content_workflow.{action}",
+        "tags": [
+            "content-agent",
+            "workflow",
+            action,
+            transport,
+            f"{llm_mode}-llm",
+            f"{image_mode}-image",
+        ],
+        "metadata": metadata,
+    }
 
 
 def _initial_state(topic_direction: str) -> AgentState:
@@ -119,9 +173,18 @@ async def _get_snapshot(thread_id: str) -> Any:
 async def start_workflow(
     topic_direction: str,
     thread_id: str | None = None,
+    *,
+    project_id: UUID | str | None = None,
+    user_id: UUID | str | None = None,
 ) -> dict[str, Any]:
     thread_id = thread_id or str(uuid4())
-    config = _graph_config(thread_id)
+    config = build_workflow_config(
+        thread_id,
+        action="start",
+        transport="rest",
+        project_id=project_id,
+        user_id=user_id,
+    )
     workflow = get_content_workflow()
     await workflow.ainvoke(_initial_state(topic_direction), config=config)
     snapshot = await workflow.aget_state(config)
@@ -131,13 +194,22 @@ async def start_workflow(
 async def resume_workflow(
     thread_id: str,
     payload: dict[str, Any],
+    *,
+    project_id: UUID | str | None = None,
+    user_id: UUID | str | None = None,
 ) -> dict[str, Any]:
     command = await prepare_resume_workflow(thread_id, payload)
 
     try:
         await get_content_workflow().ainvoke(
             command,
-            config=_graph_config(thread_id),
+            config=build_workflow_config(
+                thread_id,
+                action="resume",
+                transport="rest",
+                project_id=project_id,
+                user_id=user_id,
+            ),
         )
     except WorkflowNodeInputError as exc:
         raise WorkflowValidationError(str(exc)) from exc
@@ -168,11 +240,22 @@ async def prepare_resume_workflow(
 async def stream_workflow(
     thread_id: str,
     graph_input: AgentState | Command[Any],
+    *,
+    action: WorkflowAction,
+    transport: WorkflowTransport,
+    project_id: UUID | str | None = None,
+    user_id: UUID | str | None = None,
 ) -> AsyncIterator[WorkflowStreamUpdate]:
     try:
         async for part in get_content_workflow().astream(
             graph_input,
-            config=_graph_config(thread_id),
+            config=build_workflow_config(
+                thread_id,
+                action=action,
+                transport=transport,
+                project_id=project_id,
+                user_id=user_id,
+            ),
             stream_mode="updates",
             version="v2",
         ):
@@ -205,15 +288,35 @@ async def stream_workflow(
 def stream_start_workflow(
     topic_direction: str,
     thread_id: str,
+    *,
+    project_id: UUID | str | None = None,
+    user_id: UUID | str | None = None,
 ) -> AsyncIterator[WorkflowStreamUpdate]:
-    return stream_workflow(thread_id, _initial_state(topic_direction))
+    return stream_workflow(
+        thread_id,
+        _initial_state(topic_direction),
+        action="start",
+        transport="sse",
+        project_id=project_id,
+        user_id=user_id,
+    )
 
 
 def stream_resume_workflow(
     thread_id: str,
     command: Command[Any],
+    *,
+    project_id: UUID | str | None = None,
+    user_id: UUID | str | None = None,
 ) -> AsyncIterator[WorkflowStreamUpdate]:
-    return stream_workflow(thread_id, command)
+    return stream_workflow(
+        thread_id,
+        command,
+        action="resume",
+        transport="sse",
+        project_id=project_id,
+        user_id=user_id,
+    )
 
 
 async def get_workflow_state(thread_id: str) -> dict[str, Any]:

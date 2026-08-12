@@ -23,6 +23,13 @@ must contain at least 32 UTF-8 bytes. Keep `USE_MOCK_LLM=true` and
 contains URL-reserved characters, URL-encode it in `DATABASE_URL`. Never copy
 `backend/.env` into `.env.docker`.
 
+LangSmith tracing is optional and disabled by default. A deployment without a
+LangSmith key must keep working normally. The committed example also defaults
+`LANGSMITH_HIDE_INPUTS=true` and `LANGSMITH_HIDE_OUTPUTS=true` so workflow
+topics, articles, and review feedback are not uploaded as raw trace payloads.
+Only set `LANGSMITH_API_KEY` in the ignored `.env.docker` file when tracing is
+intentionally enabled.
+
 ## Start
 
 Run from the repository root:

@@ -22,6 +22,7 @@ from app.graph.runner import (
     stream_start_workflow,
 )
 from app.graph.state import AgentState
+from app.models.content_project import ContentProject
 from app.models.user import User
 from app.repositories.content_project_repository import (
     ContentProjectRepository,
@@ -87,13 +88,14 @@ async def _require_owned_project(
     repository: ContentProjectRepository,
     thread_id: str,
     current_user: User,
-) -> None:
+) -> ContentProject:
     project = await repository.get_by_thread_id_for_user(thread_id, current_user.id)
     if project is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"workflow thread_id 不存在: {thread_id}",
         )
+    return project
 
 
 def _stream_response(content: AsyncIterator[str]) -> StreamingResponse:
@@ -200,7 +202,7 @@ async def start(
 ) -> WorkflowResponse:
     owned_projects = _require_repository(repository)
     thread_id = str(uuid4())
-    await owned_projects.create_project(
+    project = await owned_projects.create_project(
         user_id=current_user.id,
         thread_id=thread_id,
         topic_direction=request.topic_direction,
@@ -208,7 +210,12 @@ async def start(
         revision_count=0,
     )
     try:
-        result = await start_workflow(request.topic_direction, thread_id=thread_id)
+        result = await start_workflow(
+            request.topic_direction,
+            thread_id=thread_id,
+            project_id=project.id,
+            user_id=current_user.id,
+        )
     except Exception:
         try:
             await owned_projects.delete_by_thread_id_for_user(thread_id, current_user.id)
@@ -230,7 +237,7 @@ async def start_stream(
 ) -> StreamingResponse:
     owned_projects = _require_repository(repository)
     thread_id = str(uuid4())
-    await owned_projects.create_project(
+    project = await owned_projects.create_project(
         user_id=current_user.id,
         thread_id=thread_id,
         topic_direction=request.topic_direction,
@@ -238,7 +245,12 @@ async def start_stream(
         revision_count=0,
     )
     try:
-        updates = stream_start_workflow(request.topic_direction, thread_id)
+        updates = stream_start_workflow(
+            request.topic_direction,
+            thread_id,
+            project_id=project.id,
+            user_id=current_user.id,
+        )
     except Exception:
         await _delete_starting_project(owned_projects, current_user.id, thread_id)
         raise
@@ -262,9 +274,14 @@ async def resume(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> WorkflowResponse:
     owned_projects = _require_repository(repository)
-    await _require_owned_project(owned_projects, thread_id, current_user)
+    project = await _require_owned_project(owned_projects, thread_id, current_user)
     try:
-        result = await resume_workflow(thread_id, request.to_resume_payload())
+        result = await resume_workflow(
+            thread_id,
+            request.to_resume_payload(),
+            project_id=project.id,
+            user_id=current_user.id,
+        )
     except WorkflowNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except WorkflowConflictError as exc:
@@ -286,7 +303,7 @@ async def resume_stream(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> StreamingResponse:
     owned_projects = _require_repository(repository)
-    await _require_owned_project(owned_projects, thread_id, current_user)
+    project = await _require_owned_project(owned_projects, thread_id, current_user)
     try:
         command = await prepare_resume_workflow(
             thread_id,
@@ -303,7 +320,12 @@ async def resume_stream(
         _stream_events(
             thread_id=thread_id,
             action=request.action,
-            updates=stream_resume_workflow(thread_id, command),
+            updates=stream_resume_workflow(
+                thread_id,
+                command,
+                project_id=project.id,
+                user_id=current_user.id,
+            ),
             repository=owned_projects,
             user_id=current_user.id,
         )

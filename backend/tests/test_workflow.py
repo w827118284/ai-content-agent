@@ -1,5 +1,5 @@
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -45,6 +45,17 @@ def test_start_stops_at_topic_selection():
     assert result["interrupt"]["type"] == "topic_selection"
     assert len(result["state"]["generated_topics"]) == 5
     assert "thread_id" not in result["state"]
+
+
+def test_tracing_disabled_keeps_workflow_behavior_without_tracer(monkeypatch):
+    monkeypatch.setenv("LANGSMITH_TRACING", "false")
+
+    with patch("langchain_core.tracers.langchain.LangChainTracer") as tracer:
+        result = run(start_workflow("LangGraph tracing disabled"))
+
+    assert result["status"] == "waiting_topic_selection"
+    assert result["interrupt"]["type"] == "topic_selection"
+    tracer.assert_not_called()
 
 
 def test_select_topic_generates_article_and_stops_at_review():
