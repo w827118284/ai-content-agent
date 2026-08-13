@@ -42,6 +42,7 @@ def build_service(
     response=None,
     circuit_breaker=None,
     rate_limiter=None,
+    host_resolver=None,
 ):
     client = MagicMock()
     client.images.generate = AsyncMock(
@@ -50,6 +51,8 @@ def build_service(
     )
     download_client = MagicMock()
     download_client.get = AsyncMock()
+    if host_resolver is None:
+        host_resolver = AsyncMock(return_value=("93.184.216.34",))
     service = OpenAIImageService(
         api_key="unit-test-image-key",
         base_url="https://unit.invalid/v1",
@@ -67,6 +70,7 @@ def build_service(
         download_client=download_client,
         circuit_breaker=circuit_breaker,
         rate_limiter=rate_limiter,
+        host_resolver=host_resolver,
     )
     return service, client, download_client
 
@@ -188,7 +192,75 @@ def test_generate_image_downloads_url_and_persists_public_url(tmp_path):
     assert result.startswith("/media/images/")
     assert (tmp_path / result.rsplit("/", 1)[1]).read_bytes() == b"downloaded-image"
     download_client.get.assert_awaited_once_with(
-        "https://images.example.test/temporary.png"
+        "https://images.example.test/temporary.png",
+        follow_redirects=False,
+    )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost/image.png",
+        "http://127.0.0.1/image.png",
+        "http://10.0.0.8/image.png",
+        "http://172.16.0.8/image.png",
+        "http://192.168.0.8/image.png",
+        "http://169.254.169.254/latest/meta-data",
+        "http://[::1]/image.png",
+        "file:///tmp/image.png",
+    ],
+)
+def test_temporary_url_rejects_local_and_private_targets_before_get(
+    tmp_path,
+    url,
+):
+    service, client, download_client = build_service(
+        tmp_path,
+        response=image_response(url=url),
+    )
+
+    with pytest.raises(ImageResponseError, match="图片 URL"):
+        run(service.generate_image("blocked temporary URL"))
+
+    assert client.images.generate.await_count == 1
+    download_client.get.assert_not_awaited()
+
+
+def test_temporary_url_rejects_hostname_resolving_to_private_address(tmp_path):
+    host_resolver = AsyncMock(return_value=("10.0.0.8",))
+    service, _, download_client = build_service(
+        tmp_path,
+        response=image_response(url="https://images.example.test/private.png"),
+        host_resolver=host_resolver,
+    )
+
+    with pytest.raises(ImageResponseError, match="不安全图片 URL"):
+        run(service.generate_image("private DNS target"))
+
+    host_resolver.assert_awaited_once_with("images.example.test", 443)
+    download_client.get.assert_not_awaited()
+
+
+def test_temporary_url_revalidates_redirect_before_private_dispatch(tmp_path):
+    initial_url = "https://images.example.test/temporary.png"
+    request = httpx.Request("GET", initial_url)
+    redirect = httpx.Response(
+        302,
+        headers={"Location": "http://169.254.169.254/latest/meta-data"},
+        request=request,
+    )
+    service, _, download_client = build_service(
+        tmp_path,
+        response=image_response(url=initial_url),
+    )
+    download_client.get.return_value = redirect
+
+    with pytest.raises(ImageResponseError, match="不安全图片 URL"):
+        run(service.generate_image("private redirect target"))
+
+    download_client.get.assert_awaited_once_with(
+        initial_url,
+        follow_redirects=False,
     )
 
 

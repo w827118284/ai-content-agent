@@ -1,10 +1,13 @@
 import asyncio
 import base64
 import binascii
+import ipaddress
 import logging
+import socket
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 from uuid import uuid4
 
 import httpx
@@ -23,6 +26,10 @@ from app.services.provider_guard import (
 
 
 logger = logging.getLogger(__name__)
+
+HostResolver = Callable[[str, int], Awaitable[Sequence[str]]]
+IMAGE_DOWNLOAD_REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
+IMAGE_DOWNLOAD_MAX_REDIRECTS = 5
 
 
 class ImageServiceProtocol(Protocol):
@@ -100,6 +107,23 @@ def _item_field(item: Any, name: str) -> Any:
     return item.get(name) if isinstance(item, dict) else getattr(item, name, None)
 
 
+async def _resolve_host(hostname: str, port: int) -> Sequence[str]:
+    addresses = await asyncio.to_thread(
+        socket.getaddrinfo,
+        hostname,
+        port,
+        type=socket.SOCK_STREAM,
+    )
+    return tuple(dict.fromkeys(address[4][0] for address in addresses))
+
+
+def _is_public_address(value: str) -> bool:
+    address = ipaddress.ip_address(value)
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    return address.is_global
+
+
 class OpenAIImageService:
     def __init__(
         self,
@@ -123,6 +147,7 @@ class OpenAIImageService:
         breaker_cooldown_seconds: float = 30,
         rate_limiter: SlidingWindowRateLimiter | None = None,
         circuit_breaker: CircuitBreaker | None = None,
+        host_resolver: HostResolver | None = None,
     ) -> None:
         normalized_api_key = api_key.strip() if api_key else ""
         normalized_base_url = base_url.strip().rstrip("/") if base_url else ""
@@ -169,26 +194,118 @@ class OpenAIImageService:
             breaker_failure_threshold,
             breaker_cooldown_seconds,
         )
+        self._host_resolver = host_resolver or _resolve_host
 
-    async def _download_image(self, url: str) -> bytes:
+    async def _validate_download_url(self, url: str) -> None:
         parsed = urlparse(url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
             raise ImageResponseError(
                 "真实图片 API 返回了无效图片 URL",
                 category="provider_error",
             )
+
+        hostname = parsed.hostname
+        if hostname is None:
+            raise ImageResponseError(
+                "真实图片 API 返回了无效图片 URL",
+                category="provider_error",
+            )
+        normalized_hostname = hostname.rstrip(".").lower()
+        if normalized_hostname == "localhost" or normalized_hostname.endswith(
+            ".localhost"
+        ):
+            raise ImageResponseError(
+                "真实图片 API 返回了不安全图片 URL",
+                category="provider_error",
+            )
+
+        try:
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        except ValueError:
+            raise ImageResponseError(
+                "真实图片 API 返回了无效图片 URL",
+                category="provider_error",
+            ) from None
+
+        try:
+            literal_address = ipaddress.ip_address(normalized_hostname)
+            resolved_addresses = (str(literal_address),)
+        except ValueError:
+            resolved_addresses = await self._host_resolver(
+                normalized_hostname,
+                port,
+            )
+
+        if not resolved_addresses:
+            raise ImageResponseError(
+                "真实图片 API 返回了无法解析的图片 URL",
+                category="provider_error",
+            )
+        try:
+            has_non_public_address = any(
+                not _is_public_address(address) for address in resolved_addresses
+            )
+        except ValueError:
+            raise ImageResponseError(
+                "真实图片 API 返回了无法解析的图片 URL",
+                category="provider_error",
+            ) from None
+        if has_non_public_address:
+            raise ImageResponseError(
+                "真实图片 API 返回了不安全图片 URL",
+                category="provider_error",
+            )
+
+    async def _download_with_client(self, client: Any, url: str) -> bytes:
+        current_url = url
+        for redirect_count in range(IMAGE_DOWNLOAD_MAX_REDIRECTS + 1):
+            await self._validate_download_url(current_url)
+            response = await client.get(current_url, follow_redirects=False)
+            status_code = getattr(response, "status_code", None)
+            if status_code in IMAGE_DOWNLOAD_REDIRECT_CODES:
+                if redirect_count >= IMAGE_DOWNLOAD_MAX_REDIRECTS:
+                    raise ImageResponseError(
+                        "真实图片 URL 重定向次数过多",
+                        category="provider_error",
+                    )
+                location = response.headers.get("location")
+                if not isinstance(location, str) or not location.strip():
+                    raise ImageResponseError(
+                        "真实图片 URL 重定向缺少目标地址",
+                        category="provider_error",
+                    )
+                current_url = urljoin(current_url, location.strip())
+                continue
+
+            response.raise_for_status()
+            return bytes(response.content)
+
+        raise ImageResponseError(
+            "真实图片 URL 重定向次数过多",
+            category="provider_error",
+        )
+
+    async def _download_image(self, url: str) -> bytes:
         try:
             if self._download_client is not None:
-                response = await self._download_client.get(url)
+                content = await self._download_with_client(
+                    self._download_client,
+                    url,
+                )
             else:
                 async with httpx.AsyncClient(
                     timeout=self.timeout,
-                    follow_redirects=True,
+                    follow_redirects=False,
                 ) as client:
-                    response = await client.get(url)
-            response.raise_for_status()
-            content = bytes(response.content)
+                    content = await self._download_with_client(client, url)
         except asyncio.CancelledError:
+            raise
+        except ImageResponseError:
             raise
         except Exception as exc:
             raise ImageResponseError(

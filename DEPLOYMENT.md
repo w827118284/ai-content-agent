@@ -41,13 +41,20 @@ docker compose --env-file .env.docker up -d
 docker compose --env-file .env.docker ps -a
 ```
 
-Open `http://localhost:8080`. Nginx serves the SPA and proxies `/api/` plus the
-exact `/health` route to FastAPI.
+Open `http://localhost:8080`. Nginx serves the SPA and proxies `/api/`,
+`/media/`, and the exact `/health` route to FastAPI.
 
 The startup order is database health, Alembic completion, backend health, then
 frontend. Alembic manages only business tables. LangGraph's
 `AsyncPostgresSaver.setup()` continues to manage checkpoint tables when the
 backend starts.
+
+Generated images use the `generated_images` named volume. Media URLs are
+UUID-based but do not require JWT; possession of a URL is sufficient to read
+the image. This demo boundary is suitable for shareable content, not private
+user media. Provider temporary URLs are checked against non-public addresses
+and every redirect target is revalidated, but production deployments should
+also enforce network egress policy.
 
 PostgreSQL 18 stores data under `/var/lib/postgresql/18/docker`; Compose mounts
 the named volume at `/var/lib/postgresql`, as required by the PostgreSQL 18
@@ -76,4 +83,4 @@ docker compose --env-file .env.docker down -v
 ```
 
 `down -v` deletes the PostgreSQL volume and all users, history, and workflow
-checkpoints stored in it.
+checkpoints stored in it. It also deletes the generated image volume.

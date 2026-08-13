@@ -482,7 +482,7 @@ describe("AI content workflow", () => {
           data: {
             thread_id: threadId,
             code: "workflow_stream_failed",
-            message: "图片生成失败，请稍后新建任务重试",
+            message: "工作流执行失败，请稍后新建任务重试",
             workflow: failedImageResponse(),
           },
         });
@@ -495,7 +495,7 @@ describe("AI content workflow", () => {
 
     expect(
       await screen.findByRole("heading", {
-        name: "图片生成失败，请稍后新建任务重试",
+        name: "工作流执行失败，请稍后新建任务重试",
       }),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "新建任务" })).toBeEnabled();
@@ -522,7 +522,7 @@ describe("AI content workflow", () => {
 
     expect(
       await screen.findByRole("heading", {
-        name: "图片生成失败，请稍后新建任务重试",
+        name: "工作流执行失败，请稍后新建任务重试",
       }),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "新建任务" })).toBeEnabled();

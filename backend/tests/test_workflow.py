@@ -13,6 +13,7 @@ from app.graph.runner import (
 from app.main import app
 from app.graph import nodes
 from app.services.image_service import ImageServiceError
+from app.services.llm_service import LLMServiceError
 
 
 @pytest.fixture(autouse=True)
@@ -189,6 +190,80 @@ def test_image_failure_persists_terminal_failed_state(monkeypatch):
     assert restored["state"]["status"] == "failed"
     assert restored["state"]["image_urls"] == []
     image_service.generate_images.assert_awaited_once()
+
+
+def test_topic_planning_llm_failure_becomes_terminal_failed_state(
+    monkeypatch,
+    caplog,
+):
+    sensitive_detail = "provider raw failure api_key=secret-value"
+    llm_service = MagicMock()
+    llm_service.plan_topics = AsyncMock(
+        side_effect=LLMServiceError(
+            sensitive_detail,
+            category="server_error",
+        )
+    )
+    monkeypatch.setattr(nodes, "llm_service", llm_service)
+    caplog.set_level("ERROR", logger=nodes.__name__)
+
+    failed = run(start_workflow("LLM failure governance"))
+    restored = run(get_workflow_state(failed["thread_id"]))
+
+    assert failed["status"] == "failed"
+    assert failed["is_completed"] is False
+    assert failed["interrupt"] is None
+    assert restored["status"] == "failed"
+    assert sensitive_detail not in caplog.text
+    assert "secret-value" not in caplog.text
+    assert "operation=plan_topics" in caplog.text
+    assert "category=server_error" in caplog.text
+
+
+def test_article_llm_failure_becomes_terminal_failed_state(monkeypatch):
+    started = run(start_workflow("Article failure governance"))
+    llm_service = MagicMock()
+    llm_service.write_article = AsyncMock(
+        side_effect=LLMServiceError(
+            "sanitized failure",
+            category="timeout",
+        )
+    )
+    monkeypatch.setattr(nodes, "llm_service", llm_service)
+
+    failed = run(
+        resume_workflow(started["thread_id"], {"topic_id": "topic_1"})
+    )
+
+    assert failed["status"] == "failed"
+    assert failed["is_completed"] is False
+    assert failed["interrupt"] is None
+    llm_service.write_article.assert_awaited_once()
+
+
+def test_visual_extraction_llm_failure_stops_before_images(monkeypatch):
+    started, _ = start_and_select()
+    llm_service = MagicMock()
+    llm_service.extract_visual_points = AsyncMock(
+        side_effect=LLMServiceError(
+            "sanitized failure",
+            category="rate_limit",
+        )
+    )
+    image_service = MagicMock()
+    image_service.generate_images = AsyncMock()
+    monkeypatch.setattr(nodes, "llm_service", llm_service)
+    monkeypatch.setattr(nodes, "image_service", image_service)
+
+    failed = run(
+        resume_workflow(started["thread_id"], {"action": "approve"})
+    )
+
+    assert failed["status"] == "failed"
+    assert failed["is_completed"] is False
+    assert failed["interrupt"] is None
+    llm_service.extract_visual_points.assert_awaited_once()
+    image_service.generate_images.assert_not_awaited()
 
 
 def test_reject_path_does_not_call_image_service(monkeypatch):

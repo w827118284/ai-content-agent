@@ -26,6 +26,7 @@ from app.services.auth_service import (
     verify_password,
 )
 from app.services.image_service import ImageServiceError
+from app.services.llm_service import LLMServiceError
 
 
 TEST_SECRET = "unit-test-jwt-secret-at-least-32-bytes"
@@ -251,6 +252,20 @@ def parse_sse(response: Response) -> list[tuple[str, dict]]:
     return events
 
 
+def assert_validation_error_is_sanitized(
+    response: Response,
+    *sensitive_values: str,
+) -> None:
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert isinstance(detail, list)
+    assert detail
+    assert all("input" not in error for error in detail)
+    assert all("ctx" not in error for error in detail)
+    for sensitive_value in sensitive_values:
+        assert sensitive_value not in response.text
+
+
 def test_health_and_swagger_are_available(api_context):
     assert request(api_context, "GET", "/health", authenticated=False).json() == {
         "status": "ok"
@@ -296,6 +311,52 @@ def test_register_hashes_password_and_does_not_return_hash(api_context):
     user = api_context.user_repository.users_by_username["registered_user"]
     assert user.password_hash != "registered-password"
     assert verify_password("registered-password", user.password_hash)
+
+
+def test_password_validation_does_not_echo_raw_password(api_context):
+    sensitive_password = "short!"
+
+    response = request(
+        api_context,
+        "POST",
+        "/api/v1/auth/register",
+        authenticated=False,
+        json={"username": "short_password_user", "password": sensitive_password},
+    )
+
+    assert response.status_code == 422
+    assert sensitive_password not in response.text
+
+
+def test_malformed_dict_password_does_not_echo_raw_input(api_context):
+    sensitive_value = "secret-value"
+
+    response = request(
+        api_context,
+        "POST",
+        "/api/v1/auth/register",
+        authenticated=False,
+        json={
+            "username": "bad_password_type",
+            "password": {"secret": sensitive_value},
+        },
+    )
+
+    assert_validation_error_is_sanitized(response, sensitive_value)
+
+
+def test_malformed_list_password_does_not_echo_raw_input(api_context):
+    sensitive_value = "another-secret-value"
+
+    response = request(
+        api_context,
+        "POST",
+        "/api/v1/auth/register",
+        authenticated=False,
+        json={"username": "bad_password_type", "password": [sensitive_value]},
+    )
+
+    assert_validation_error_is_sanitized(response, sensitive_value)
 
 
 def test_duplicate_username_returns_409(api_context):
@@ -485,7 +546,11 @@ def test_invalid_action_returns_422(api_context):
         f"/api/v1/workflows/{started['thread_id']}/resume",
         json={"action": "publish"},
     )
-    assert response.status_code == 422
+    assert_validation_error_is_sanitized(response, "publish")
+    assert any(
+        error.get("loc") == ["body", "action"]
+        for error in response.json()["detail"]
+    )
 
 
 def test_action_must_match_current_interrupt(api_context):
@@ -663,12 +728,30 @@ def test_graph_start_failure_removes_starting_ownership_row(api_context, monkeyp
     assert api_context.project_repository.delete_calls == 1
 
 
-def test_resume_metadata_sync_failure_does_not_change_graph_response(api_context):
+def test_resume_metadata_sync_failure_does_not_change_graph_response(
+    api_context,
+    monkeypatch,
+    caplog,
+):
+    sensitive_detail = "database raw failure password=secret-value"
     started = start_workflow(api_context)
-    api_context.project_repository.fail_sync = True
+
+    async def fail_sync(*args, **kwargs):
+        raise RuntimeError(sensitive_detail)
+
+    monkeypatch.setattr(
+        api_context.project_repository,
+        "update_from_state",
+        fail_sync,
+    )
+    caplog.set_level("ERROR", logger=workflow_api.__name__)
     selected = select_topic(api_context, started["thread_id"])
+
     assert selected["status"] == "waiting_article_review"
     assert selected["state"]["article_content"]
+    assert sensitive_detail not in caplog.text
+    assert "secret-value" not in caplog.text
+    assert "RuntimeError" in caplog.text
 
 
 def test_sse_encoder_uses_json_and_standard_framing():
@@ -845,7 +928,7 @@ def test_image_failure_emits_terminal_error_and_state_is_failed(
 
     assert events[-1][0] == "error"
     assert events[-1][1]["code"] == "workflow_stream_failed"
-    assert events[-1][1]["message"] == "图片生成失败，请稍后新建任务重试"
+    assert events[-1][1]["message"] == "工作流执行失败，请稍后新建任务重试"
     assert events[-1][1]["workflow"] == restored
     assert events[-1][1]["workflow"]["status"] == "failed"
     assert "sanitized failure" not in response.text
@@ -859,6 +942,45 @@ def test_image_failure_emits_terminal_error_and_state_is_failed(
     assert api_context.project_repository.projects[
         started["thread_id"]
     ].status == "failed"
+
+
+def test_llm_failure_emits_terminal_error_with_authoritative_failed_state(
+    api_context,
+    monkeypatch,
+):
+    sensitive_detail = "provider raw failure api_key=secret-value"
+    llm_service = SimpleNamespace(
+        plan_topics=AsyncMock(
+            side_effect=LLMServiceError(
+                sensitive_detail,
+                category="server_error",
+            )
+        )
+    )
+    monkeypatch.setattr(nodes, "llm_service", llm_service)
+
+    response = request(
+        api_context,
+        "POST",
+        "/api/v1/workflows/start/stream",
+        json={"topic_direction": "LLM terminal failure"},
+    )
+
+    events = parse_sse(response)
+    workflow = events[-1][1]["workflow"]
+    restored = request(
+        api_context,
+        "GET",
+        f"/api/v1/workflows/{workflow['thread_id']}/state",
+    ).json()
+
+    assert [event for event, _ in events] == ["meta", "error"]
+    assert events[-1][1]["message"] == "工作流执行失败，请稍后新建任务重试"
+    assert workflow == restored
+    assert workflow["status"] == "failed"
+    assert workflow["interrupt"] is None
+    assert sensitive_detail not in response.text
+    assert "secret-value" not in response.text
 
 
 def test_generated_media_is_browser_accessible(api_context, monkeypatch, tmp_path):

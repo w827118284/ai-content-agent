@@ -2,6 +2,8 @@
 
 基于 FastAPI 和 LangGraph 的 AI 自媒体内容运营工作流。当前已跑通选题、人工选择、文章生成、人工审核、Reject 重写、Approve、视觉知识点提炼和图片生成，并支持文字 LLM 与图片模型的 Mock / Real 切换。
 
+项目总览见仓库根目录 [README](../README.md)，完整技术边界见 [Architecture](../docs/ARCHITECTURE.md)。
+
 ## 环境
 
 - Python 3.11+
@@ -14,6 +16,8 @@ python --version  # 确认版本为 3.11+
 python -m venv .venv
 .venv\Scripts\python -m pip install -r requirements.txt
 ```
+
+`requirements.txt` 精确锁定当前已通过 Windows 与 Docker 回归的直接依赖和关键运行时依赖，避免本机与镜像解析到不同 patch 版本。它不是操作系统级全量 `pip freeze`。
 
 ## 运行
 
@@ -90,7 +94,7 @@ IMAGE_PUBLIC_PREFIX=/media/images
 IMAGE_TIMEOUT_SECONDS=300
 ```
 
-服务通过 OpenAI-compatible `images/generations` 接口生成图片，同时支持 `b64_json` 和临时 `url` 响应。图片会立即保存到 `IMAGE_OUTPUT_DIR`，State 中只记录 `/media/images/<filename>` 形式的相对公开 URL。真实生图请求的 SDK 与 application-level 自动 retry 均关闭：timeout、connection、429 或 5xx 也只发送 1 次收费 POST，因为客户端无法判断 Provider 是否已经接受请求或扣费。
+服务通过 OpenAI-compatible `images/generations` 接口生成图片，同时支持 `b64_json` 和临时 `url` 响应。临时 URL 只允许解析到公网地址，自动重定向关闭且每一跳都会重新校验，避免访问 localhost、私网、link-local 或云 metadata 地址。图片会立即保存到 `IMAGE_OUTPUT_DIR`，State 中只记录 `/media/images/<filename>` 形式的相对公开 URL。真实生图请求的 SDK 与 application-level 自动 retry 均关闭：timeout、connection、429 或 5xx 也只发送 1 次收费 POST，因为客户端无法判断 Provider 是否已经接受请求或扣费。
 
 ## Provider 调用治理
 
@@ -166,11 +170,7 @@ Alembic 只管理 `users`、`content_projects` 与 `alembic_version`。LangGraph
 
 FastAPI startup 不执行 `metadata.create_all()`，只创建 AsyncEngine/sessionmaker 并通过 `SELECT 1` 检查业务数据库可用性。隔离测试数据库仍可使用 `initialize_business_database()` 快速建表。
 
-Windows 下使用 Psycopg async 连接 PostgreSQL 时，显式使用 SelectorEventLoop 启动 Uvicorn：
-
-```powershell
-.venv\Scripts\python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --loop asyncio:SelectorEventLoop
-```
+Windows pytest 在 `tests/conftest.py` 中于创建 event loop 前设置 Selector policy，以兼容 Psycopg async。Uvicorn 使用前文的普通单 worker 启动命令；不要向 `--loop` 传入 event loop class 名称。
 
 ## 测试
 
@@ -188,4 +188,6 @@ Windows 下使用 Psycopg async 连接 PostgreSQL 时，显式使用 SelectorEve
 
 ## 当前限制
 
-真实图片 URL 尚未转存永久对象存储。Memory Checkpointer 仅适用于单进程开发和测试；用户、ownership、持久化工作流与历史列表需要 PostgreSQL 模式。本阶段只提供短期 Access Token，不包含 Refresh Token、RBAC 或 OAuth。
+生成图片只持久化到本地目录或 Docker volume，尚未接入对象存储、CDN、备份与生命周期策略。`/media/images/<uuid>` 是不要求 JWT 的公开静态 URL：文件名不可预测，但知道 URL 的访问者可以直接读取，不能视为严格的跨用户私有媒体方案。应用层会阻止临时图片 URL 访问非公网地址并逐跳检查重定向；生产环境仍应使用 egress policy 补充防御 DNS rebinding。
+
+Memory Checkpointer 仅适用于单进程测试与工作流学习；用户、ownership、持久化工作流与历史列表需要 PostgreSQL 模式。Rate limiter 与 circuit breaker 为 process-local，SSE 断开会传播 cancellation。本阶段只提供短期 Access Token，不包含 Refresh Token、RBAC 或 OAuth。

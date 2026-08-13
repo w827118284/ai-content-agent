@@ -1,7 +1,7 @@
 name: ai-content-agent
 
 x-backend-common: &backend-common
-  image: ai-content-agent-backend:phase8
+  image: ai-content-agent-backend:local
   build:
     context: ./backend
   environment:
@@ -92,7 +92,7 @@ services:
       start_period: 10s
 
   frontend:
-    image: ai-content-agent-frontend:phase8
+    image: ai-content-agent-frontend:local
     build:
       context: ./frontend
       args:

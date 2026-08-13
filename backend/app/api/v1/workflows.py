@@ -77,10 +77,12 @@ async def _sync_history_row(
     state: AgentState = result["state"]
     try:
         await repository.update_from_state(result["thread_id"], user_id, state)
-    except Exception:
-        logger.exception(
-            "Failed to sync content project history for thread_id=%s",
+    except Exception as exc:
+        logger.error(
+            "Failed to sync content project history for thread_id=%s "
+            "error_type=%s",
             result["thread_id"],
+            type(exc).__name__,
         )
 
 
@@ -124,7 +126,7 @@ def _terminal_event(result: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             {
                 "thread_id": response["thread_id"],
                 "code": "workflow_stream_failed",
-                "message": "图片生成失败，请稍后新建任务重试",
+                "message": "工作流执行失败，请稍后新建任务重试",
                 "workflow": response,
             },
         )
@@ -138,10 +140,12 @@ async def _delete_starting_project(
 ) -> None:
     try:
         await repository.delete_by_thread_id_for_user(thread_id, user_id)
-    except Exception:
-        logger.exception(
-            "Failed to compensate starting project for thread_id=%s",
+    except Exception as exc:
+        logger.error(
+            "Failed to compensate starting project for thread_id=%s "
+            "error_type=%s",
             thread_id,
+            type(exc).__name__,
         )
 
 
@@ -219,10 +223,12 @@ async def start(
     except Exception:
         try:
             await owned_projects.delete_by_thread_id_for_user(thread_id, current_user.id)
-        except Exception:
-            logger.exception(
-                "Failed to compensate starting project for thread_id=%s",
+        except Exception as exc:
+            logger.error(
+                "Failed to compensate starting project for thread_id=%s "
+                "error_type=%s",
                 thread_id,
+                type(exc).__name__,
             )
         raise
     await _sync_history_row(owned_projects, current_user.id, result)

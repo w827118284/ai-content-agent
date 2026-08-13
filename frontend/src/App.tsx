@@ -49,7 +49,7 @@ const statusLabels: Record<WorkflowStatus, string> = {
   rewriting: "正在重写文章",
   extracting_visuals: "正在提炼视觉点",
   generating_images: "正在生成图片",
-  failed: "图片生成失败",
+  failed: "执行失败",
   completed: "已完成",
 };
 
@@ -407,7 +407,7 @@ function Workspace({ user, onLogout }: WorkspaceProps) {
       return (
         <div className="processing-state" role="alert">
           <X size={26} aria-hidden="true" />
-          <h2>图片生成失败，请稍后新建任务重试</h2>
+          <h2>工作流执行失败，请稍后新建任务重试</h2>
           <button className="secondary-button" type="button" onClick={handleNewTask}>
             新建任务
           </button>

@@ -31,6 +31,16 @@ def require_repository(repository: UserRepository | None) -> UserRepository:
     return repository
 
 
+def validated_password(request: AuthCredentials) -> str:
+    password = request.password.get_secret_value()
+    if not 8 <= len(password) <= 128:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="password 长度必须在 8 到 128 个字符之间",
+        )
+    return password
+
+
 @router.post(
     "/register",
     response_model=UserResponse,
@@ -43,7 +53,7 @@ async def register(
     try:
         user = await require_repository(repository).create_user(
             username=request.username,
-            password_hash=hash_password(request.password.get_secret_value()),
+            password_hash=hash_password(validated_password(request)),
         )
     except DuplicateUsernameError as exc:
         raise HTTPException(
@@ -59,7 +69,7 @@ async def login(
     repository: UserRepositoryDependency,
 ) -> AccessTokenResponse:
     user = await require_repository(repository).get_by_username(request.username)
-    password = request.password.get_secret_value()
+    password = validated_password(request)
     if user is None or not user.is_active or not verify_password(password, user.password_hash):
         raise authentication_error()
 

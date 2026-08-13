@@ -5,7 +5,7 @@ from langgraph.types import interrupt
 
 from app.graph.state import AgentState
 from app.services.image_service import ImageServiceError, get_image_service
-from app.services.llm_service import get_llm_service
+from app.services.llm_service import LLMServiceError, get_llm_service
 
 
 class WorkflowNodeInputError(ValueError):
@@ -17,8 +17,24 @@ llm_service = get_llm_service()
 image_service = get_image_service()
 
 
+def _llm_failure_update(
+    operation: str,
+    exc: LLMServiceError,
+) -> dict[str, Any]:
+    logger.error(
+        "LLM workflow node failed operation=%s category=%s error_type=%s",
+        operation,
+        exc.category,
+        type(exc).__name__,
+    )
+    return {"status": "failed"}
+
+
 async def plan_topics(state: AgentState) -> dict[str, Any]:
-    topics = await llm_service.plan_topics(state["topic_direction"])
+    try:
+        topics = await llm_service.plan_topics(state["topic_direction"])
+    except LLMServiceError as exc:
+        return _llm_failure_update("plan_topics", exc)
     return {
         "generated_topics": topics,
         "status": "waiting_topic_selection",
@@ -57,13 +73,16 @@ async def write_draft(state: AgentState) -> dict[str, Any]:
         raise WorkflowNodeInputError("生成文章前必须先选择选题")
 
     is_rewrite = state["review_status"] == "rejected"
-    article = await llm_service.write_article(
-        topic_direction=state["topic_direction"],
-        selected_topic=selected_topic,
-        previous_article=state["article_content"] if is_rewrite else None,
-        feedback=state["review_feedback"] if is_rewrite else None,
-        revision_count=state["revision_count"],
-    )
+    try:
+        article = await llm_service.write_article(
+            topic_direction=state["topic_direction"],
+            selected_topic=selected_topic,
+            previous_article=state["article_content"] if is_rewrite else None,
+            feedback=state["review_feedback"] if is_rewrite else None,
+            revision_count=state["revision_count"],
+        )
+    except LLMServiceError as exc:
+        return _llm_failure_update("write_draft", exc)
     return {
         "article_content": article,
         "review_status": "pending",
@@ -113,10 +132,13 @@ async def extract_visuals(state: AgentState) -> dict[str, Any]:
     if selected_topic is None or article_content is None:
         raise WorkflowNodeInputError("提炼视觉知识点前必须存在已审核文章")
 
-    visual_points = await llm_service.extract_visual_points(
-        selected_topic=selected_topic,
-        article_content=article_content,
-    )
+    try:
+        visual_points = await llm_service.extract_visual_points(
+            selected_topic=selected_topic,
+            article_content=article_content,
+        )
+    except LLMServiceError as exc:
+        return _llm_failure_update("extract_visuals", exc)
     return {
         "visual_points": visual_points,
         "status": "generating_images",

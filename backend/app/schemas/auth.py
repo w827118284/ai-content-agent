@@ -9,7 +9,7 @@ class AuthCredentials(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     username: str = Field(min_length=3, max_length=50)
-    password: SecretStr = Field(min_length=8, max_length=128)
+    password: SecretStr
 
     @field_validator("username")
     @classmethod
@@ -18,7 +18,6 @@ class AuthCredentials(BaseModel):
         if len(stripped) < 3:
             raise ValueError("username 至少需要 3 个字符")
         return stripped
-
 
 class UserResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)

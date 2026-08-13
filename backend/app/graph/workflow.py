@@ -24,6 +24,10 @@ def route_after_review(state: AgentState) -> Literal["rejected", "approved"]:
     raise ValueError(f"human_review returned invalid review_status: {review_status!r}")
 
 
+def route_after_llm_node(state: AgentState) -> Literal["continue", "failed"]:
+    return "failed" if state["status"] == "failed" else "continue"
+
+
 workflow_builder = StateGraph(AgentState)
 workflow_builder.add_node("plan_topics", plan_topics)
 workflow_builder.add_node("human_select_topic", human_select_topic)
@@ -33,9 +37,17 @@ workflow_builder.add_node("extract_visuals", extract_visuals)
 workflow_builder.add_node("generate_images", generate_images)
 
 workflow_builder.add_edge(START, "plan_topics")
-workflow_builder.add_edge("plan_topics", "human_select_topic")
+workflow_builder.add_conditional_edges(
+    "plan_topics",
+    route_after_llm_node,
+    {"continue": "human_select_topic", "failed": END},
+)
 workflow_builder.add_edge("human_select_topic", "write_draft")
-workflow_builder.add_edge("write_draft", "human_review")
+workflow_builder.add_conditional_edges(
+    "write_draft",
+    route_after_llm_node,
+    {"continue": "human_review", "failed": END},
+)
 workflow_builder.add_conditional_edges(
     "human_review",
     route_after_review,
@@ -44,7 +56,11 @@ workflow_builder.add_conditional_edges(
         "approved": "extract_visuals",
     },
 )
-workflow_builder.add_edge("extract_visuals", "generate_images")
+workflow_builder.add_conditional_edges(
+    "extract_visuals",
+    route_after_llm_node,
+    {"continue": "generate_images", "failed": END},
+)
 workflow_builder.add_edge("generate_images", END)
 
 

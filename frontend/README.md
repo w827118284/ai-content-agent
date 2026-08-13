@@ -9,7 +9,7 @@ React + TypeScript + Vite 前端，用于操作带 JWT 登录与用户归属保�
 ## 开发
 
 ```powershell
-npm install
+npm ci
 npm run dev
 ```
 
